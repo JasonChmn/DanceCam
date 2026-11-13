@@ -1,5 +1,19 @@
 # WebcamDance
 
+Jeu de danse à la webcam, de 1 à 4 joueurs, sans manette ni capteur : on danse face à l'écran en imitant
+le ou les danseurs d'une vidéo, et le jeu note chaque mouvement.
+
+N'importe quelle vidéo de chorégraphie peut devenir une chanson jouable : dance practice K-pop, clip,
+tutoriel, cours de danse… Il suffit d'un lien (vidéo ou playlist YouTube) :
+- **Import** : téléchargement, détection automatique du début et de la fin de la danse, repérage des
+  danseurs « coachs » (1 à 4) et extraction hors ligne de leur squelette image par image avec YOLO-pose,
+  recadrage de la vidéo sur les coachs.
+- **En jeu** : la webcam est analysée en temps réel (YOLO-pose sur GPU), chaque joueur est suivi et associé
+  à un coach, puis comparé à lui par l'orientation des membres, avec une tolérance de décalage et un poids
+  plus fort sur les membres en mouvement. Chaque mouvement est jugé de PERFECT à MISS.
+
+Aucune vidéo n'est fournie avec le projet : chacun importe les siennes.
+
 ```
 cd ~/Documents/perso/danceCam/webcamdance
 
