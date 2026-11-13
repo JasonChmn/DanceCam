@@ -1,0 +1,9 @@
+# torch CUDA à installer AVANT : pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
+ultralytics>=8.4.0
+opencv-python
+numpy
+scipy
+pygame-ce
+yt-dlp[default]   # inclut le solveur JS (yt-dlp-ejs)
+deno             # moteur JS exigé par YouTube via yt-dlp (binaire fourni par pip, Windows inclus)
+imageio-ffmpeg
