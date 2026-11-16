@@ -56,7 +56,8 @@ python -m webcamdance --fullscreen         # ou F11 en jeu ; --window 1920x1080,
 ```
 Menu : ↑/↓ choisir · Entrée jouer · 1-4 joueurs, 5 groupe · A ajouter (coller un ou plusieurs liens / une
 playlist, Ctrl+V) · Suppr supprimer · Échap quitter.
-En jeu : Espace pause · S squelettes coach · ←/→ changer de coach (calibration) · Échap retour.
+En jeu : Espace ou Échap pause (Reprendre · Recommencer · Retour au menu ; aussi si on quitte la fenêtre) ·
+S squelettes coach · P pictos · ←/→ changer de coach (calibration).
 
 ### Importer
 `import_list` : déjà importées sautées, liste consommée au fur et à mesure, journal dans `logs/`,
@@ -78,6 +79,9 @@ Stockage : vidéo recadrée sur le bandeau des coachs, 720p H.264 (~30–40 Mo p
 - `tools/bot_play.py songs/X [--players N --isolate --still --cam-song songs/Y]` : partie jouée par un
   bot (la « webcam » rejoue la vidéo), pour tester sans danser.
 - `tools/analyze_log.py logs/<partie>.jsonl` : fps, latence, scores et décalages par move.
+- `tools/qa_soak.py [--rounds 2] [--window 1920x1080]` : banc « soirée » (~8 min, bot, rien à faire) :
+  enchaîne solo / 2-4 joueurs / groupe avec pause, Recommencer, abandon ; mesure fluidité, inférence,
+  fuites mémoire. À lancer sur la machine qui joue ; rapport dans `logs/qa_<date>/`.
 
 ### Réglages (webcamdance/config.py)
 - `cam_latency` / `--latency-ms` : si les jugements semblent en retard/avance.

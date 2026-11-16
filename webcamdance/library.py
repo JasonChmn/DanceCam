@@ -1,11 +1,46 @@
 """Bibliothèque de chansons importées : liste, vignettes, meilleurs scores, suppression."""
 import json
+import os
 import re
 import shutil
 import time
 from pathlib import Path
 
 import cv2
+import numpy as np
+
+def write_text_atomic(path, text):
+    """Écrit via un fichier temporaire puis le renomme : un plantage ou une coupure pendant
+    l'écriture laisse l'ancien fichier intact (sinon : fichier tronqué, historique perdu)."""
+    path = Path(path)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    try:
+        os.replace(tmp, path)
+    except OSError:                 # Windows : fichier cible verrouillé un instant (antivirus…)
+        path.write_text(text, encoding="utf-8")
+        tmp.unlink(missing_ok=True)
+
+
+def read_image(path):
+    """cv2.imread qui accepte les chemins accentués (Windows) ; None si illisible."""
+    try:
+        buf = np.fromfile(str(path), np.uint8)
+        return cv2.imdecode(buf, cv2.IMREAD_COLOR) if buf.size else None
+    except (OSError, cv2.error):
+        return None
+
+
+def write_image(path, img, params=()):
+    """cv2.imwrite qui accepte les chemins accentués (Windows). -> True si écrit."""
+    try:
+        ok, buf = cv2.imencode(Path(path).suffix, img, list(params))
+        if ok:
+            buf.tofile(str(path))
+        return bool(ok)
+    except (OSError, cv2.error):
+        return False
+
 
 REQUIRED = ("meta.json", "video.mp4", "audio.ogg", "poses.npz")
 YT_ID = re.compile(r"(?:v=|youtu\.be/|shorts/)([\w-]{11})")
@@ -117,7 +152,7 @@ def save_result(song, scores, n_players):
         entries.append({"date": date, "players": n_players, "player": p + 1, "total": sc.total,
                         "ratio": round(sc.ratio, 4), "stars": sc.stars, "counts": sc.counts})
         records.append(sc.total > prev_total and sc.total > 0)
-    (Path(song) / "scores.json").write_text(json.dumps(entries, indent=1, ensure_ascii=False), encoding="utf-8")
+    write_text_atomic(Path(song) / "scores.json", json.dumps(entries, indent=1, ensure_ascii=False))
     return records
 
 
@@ -134,7 +169,8 @@ def thumbnail(song, width=320):
         if not ok:
             return None
         h = int(f.shape[0] * width / f.shape[1])
-        cv2.imwrite(str(p), cv2.resize(f, (width, h), interpolation=cv2.INTER_AREA), [cv2.IMWRITE_JPEG_QUALITY, 85])
+        if not write_image(p, cv2.resize(f, (width, h), interpolation=cv2.INTER_AREA), [cv2.IMWRITE_JPEG_QUALITY, 85]):
+            return None
     return p
 
 

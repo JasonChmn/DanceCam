@@ -14,22 +14,31 @@ from .tracking import OneEuro, PlayerTracker, centers_scales, select_people
 
 
 class Camera(threading.Thread):
+    RECONNECT = 2.0     # s sans image avant de rouvrir la caméra (câble débranché puis rebranché)
+
     def __init__(self, cfg):
         super().__init__(daemon=True)
-        backend = cv2.CAP_DSHOW if sys.platform == "win32" else cv2.CAP_ANY
-        self.cap = cv2.VideoCapture(cfg.cam_index, backend)
-        self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))  # sinon YUY2 bridé à ~10 fps en 720p
-        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, cfg.cam_w)
-        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, cfg.cam_h)
-        self.cap.set(cv2.CAP_PROP_FPS, cfg.cam_fps)
-        # 1 seul tampon => V4L2 tombe à 15 fps (mesuré) ; le thread lit en continu, 2 suffit
-        self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 2)
+        self.cfg = cfg
+        self.cap = self._open()
         ok, f = self.cap.read()
         if not ok:
+            self.cap.release()
             raise RuntimeError(f"Webcam {cfg.cam_index} inaccessible")
         self.h, self.w = f.shape[:2]
         self._latest = (0, cv2.flip(f, 1), time.perf_counter())
         self._halt = False
+
+    def _open(self):
+        cfg = self.cfg
+        backend = cv2.CAP_DSHOW if sys.platform == "win32" else cv2.CAP_ANY
+        cap = cv2.VideoCapture(cfg.cam_index, backend)
+        cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))  # sinon YUY2 bridé à ~10 fps en 720p
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, cfg.cam_w)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, cfg.cam_h)
+        cap.set(cv2.CAP_PROP_FPS, cfg.cam_fps)
+        # 1 seul tampon => V4L2 tombe à 15 fps (mesuré) ; le thread lit en continu, 2 suffit
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 2)
+        return cap
 
     def latest(self):
         return self._latest
@@ -38,30 +47,73 @@ class Camera(threading.Thread):
         self._halt = True
 
     def run(self):
-        fid = 0
+        fid, last_ok = 0, time.perf_counter()
         while not self._halt:
-            ok, f = self.cap.read()
+            try:
+                ok, f = self.cap.read()
+            except cv2.error:
+                ok = False
             t = time.perf_counter()
-            if not ok:
-                time.sleep(0.005)
+            if not ok or f is None or f.shape[:2] != (self.h, self.w):
+                if t - last_ok > self.RECONNECT:       # caméra perdue : on la rouvre (≈ 1 essai / 2 s)
+                    print(f"[camera] plus d'image : réouverture de la caméra {self.cfg.cam_index}")
+                    self.cap.release()
+                    self.cap = self._open()
+                    last_ok = time.perf_counter()
+                else:
+                    time.sleep(0.005)
                 continue
+            last_ok = t
             fid += 1
             # miroir AVANT inférence : géométrie et labels G/D directement comparables au coach
             self._latest = (fid, cv2.flip(f, 1), t)
         self.cap.release()
 
 
-class PlayerWorker(threading.Thread):
+class _Runner:
+    """Thread d'inférence unique, créé une fois et réutilisé par toutes les parties.
+
+    PyTorch garde ~35 Mo de RAM par thread qui a utilisé CUDA (poignées cuBLAS / cuDNN), jamais
+    rendus à la fin du thread : un thread neuf par partie faisait grossir le processus à chaque partie."""
+    _inst = None
+    _guard = threading.Lock()
+
+    def __init__(self):
+        self.jobs = queue.SimpleQueue()
+        threading.Thread(target=self._loop, daemon=True, name="inference").start()
+
+    def _loop(self):
+        while True:
+            job, done = self.jobs.get()
+            try:
+                job()
+            finally:
+                done.set()
+
+    @classmethod
+    def submit(cls, job):
+        with cls._guard:
+            if cls._inst is None:
+                cls._inst = cls()
+        done = threading.Event()
+        cls._inst.jobs.put((job, done))
+        return done
+
+
+class PlayerWorker:
     """Inférence sur la dernière frame caméra, affectation aux slots, lissage, publication.
 
     Mode groupe (group=True) : nombre de joueurs inconnu au départ. Le worker publie toutes les
     personnes vues (`raw`) jusqu'à lock_people() (photo bras levés), puis suit ces personnes ;
-    keep() réduit ensuite aux joueurs retenus."""
+    keep() réduit ensuite aux joueurs retenus.
+
+    Même interface qu'un thread (start / stop / join / is_alive), mais la boucle tourne dans le
+    thread d'inférence partagé (_Runner) : une partie à la fois."""
 
     FREE_MAX = 12      # personnes publiées en mode libre (photo de groupe)
 
     def __init__(self, cam, pose, cfg, n_players, group=False):
-        super().__init__(daemon=True)
+        self._done = None
         self.cam, self.pose, self.cfg, self.n, self.group = cam, pose, cfg, n_players, group
         self.imgsz = cfg.group_imgsz if group else None
         self._infer(np.zeros((cam.h, cam.w, 3), np.uint8))  # warmup à la résolution caméra (sinon ~1 s sur la 1re frame)
@@ -104,6 +156,16 @@ class PlayerWorker(threading.Thread):
 
     def stop(self):
         self._halt = True
+
+    def start(self):
+        self._done = _Runner.submit(self.run)
+
+    def join(self, timeout=None):
+        if self._done is not None:
+            self._done.wait(timeout)
+
+    def is_alive(self):
+        return self._done is not None and not self._done.is_set()
 
     def _run_cmds(self):
         while self._cmds:

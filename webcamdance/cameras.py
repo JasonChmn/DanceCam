@@ -78,7 +78,8 @@ class Settings:
     def set(self, **kv):
         self.data.update(kv)
         try:
-            self.path.write_text(json.dumps(self.data, indent=2, ensure_ascii=False), encoding="utf-8")
+            from .library import write_text_atomic
+            write_text_atomic(self.path, json.dumps(self.data, indent=2, ensure_ascii=False))
         except OSError:
             pass
 

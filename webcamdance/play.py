@@ -2,8 +2,9 @@
 
     python -m webcamdance.play songs/<nom> --players 2
 
-Touches : Espace = pause, S = squelettes coach, P = pictos des mouvements à venir, ←/→ = changer de coach (calibration),
-F11 = plein écran, Échap = retour / quitter.
+Touches : Espace ou Échap = pause (Reprendre · Recommencer · Retour au menu), S = squelettes coach,
+P = pictos des mouvements à venir, ←/→ = changer de coach (calibration), F11 = plein écran.
+Hors partie (calibration, résultats), Échap = retour au menu. Fenêtre quittée (Alt+Tab) = pause.
 
 Mode groupe (--players 5 ou plus, jusqu'à 8) : comptage bras levés (5 s), photo où chacun reçoit son
 P1…Pn et son coach (clic : changer de coach, clic droit : retirer/ajouter, T : tous sur le même
@@ -11,6 +12,7 @@ coach, R : refaire), puis jeu collaboratif (jauge et combos d'équipe).
 """
 import argparse
 import dataclasses
+import gc
 import json
 import threading
 import time
@@ -223,6 +225,30 @@ def draw_button(surf, label, rect, color, on=True):
     hud.text(surf, label, 22, (10, 10, 20) if on else (220, 220, 230), rect.center, "center", shadow=False)
 
 
+PAUSE_ITEMS = [("resume", "Reprendre"), ("restart", "Recommencer"), ("menu", "Retour au menu")]
+
+
+def pause_buttons(W, H):
+    """Boutons du menu pause : (clé, libellé, rect), empilés au centre."""
+    px = hud.px
+    w, h, gap = px(380), px(58), px(16)
+    y0 = H // 2 - (len(PAUSE_ITEMS) * (h + gap) - gap) // 2 + px(30)
+    return [(k, lab, pygame.Rect(W // 2 - w // 2, y0 + i * (h + gap), w, h)) for i, (k, lab) in enumerate(PAUSE_ITEMS)]
+
+
+def draw_pause(surf, sel):
+    W, H = surf.get_size()
+    dim = pygame.Surface((W, H), pygame.SRCALPHA)
+    dim.fill((0, 0, 0, 170))
+    surf.blit(dim, (0, 0))
+    btns = pause_buttons(W, H)
+    hud.text(surf, "PAUSE", 56, (255, 255, 255), (W // 2, btns[0][2].y - hud.px(24)), "midbottom")
+    for i, (_, lab, r) in enumerate(btns):
+        draw_button(surf, lab, r, (0, 229, 255), on=i == sel)
+    hud.text(surf, "↑ / ↓ choisir · Entrée valider · Échap reprendre", 18, (200, 200, 215),
+             (W // 2, btns[-1][2].bottom + hud.px(20)), "midtop", bold=False)
+
+
 def person_at(raw, rect, pos):
     """Indice de la personne de la photo sous le clic (boîte la plus petite qui le contient)."""
     frame, boxes = raw[0], raw[3]
@@ -250,7 +276,21 @@ def draw_people(surf, frame, kpts, rect, thr, styles):
 
 
 def run_game(disp, sess, song, n, log_path=None):
-    """Joue une partie. -> ("menu" | "quit", scores, records) ; scores vide si abandon avant la musique."""
+    """Joue une partie. -> ("menu" | "restart" | "quit", scores, records) ; scores vide si abandon avant la musique.
+    En cas d'erreur (chanson illisible…), les threads de la partie sont arrêtés avant de la relayer."""
+    started = []        # threads lancés (suivi des joueurs, vidéo, pictos)
+    try:
+        return _run_game(disp, sess, song, n, log_path, started)
+    finally:
+        pygame.mixer.music.stop()
+        for th in started:
+            th.stop()
+        for th in started:
+            if hasattr(th, "join"):
+                th.join(timeout=2)
+
+
+def _run_game(disp, sess, song, n, log_path, started):
     cfg = sess.cfg
     group = n >= 5
     if group:   # on note ce qui est visible : un joueur du fond dont seuls les bras dépassent compte
@@ -263,14 +303,15 @@ def run_game(disp, sess, song, n, log_path=None):
     disp.message("Chargement de la chanson…")
     coach = CoachTrack(song / "poses.npz", cfg)
     pictos = Pictos(coach.kpts, coach.fps, cfg.kpt_conf)
+    started.append(pictos)
     scores, records = [], []        # scores créés au démarrage de la musique (association figée)
     log = GameLog(log_path or Path("logs") / f"{song.name}_{time.strftime('%Y%m%d-%H%M%S')}.jsonl",
                   song=str(song), players=n, group=group, vsync=disp.vsync_on, cfg=dataclasses.asdict(cfg))
     cam = sess.cam
-    worker = PlayerWorker(cam, sess.pose, cfg, n, group=group); worker.start()
+    worker = PlayerWorker(cam, sess.pose, cfg, n, group=group); worker.start(); started.append(worker)
     W, H = disp.screen.get_size()
     video = VideoPlayer(song / "video.mp4", (W, int(H * 0.65)), band=meta.get("band", (0.0, 1.0)),
-                        coach_kpts=coach.kpts, thr=cfg.kpt_conf, dim=0.4); video.start()
+                        coach_kpts=coach.kpts, thr=cfg.kpt_conf, dim=0.4); video.start(); started.append(video)
 
     def relayout():
         """Disposition à la résolution native : bandeau coach(s) en haut (65 %), bande joueurs en bas."""
@@ -292,6 +333,10 @@ def run_game(disp, sess, song, n, log_path=None):
         return L
 
     L = relayout()
+    # chargement fini : objets présents (modèle, chanson) figés hors du ramasse-miettes -> pas de
+    # collecte complète (~100 ms, saccade visible) pendant la partie
+    gc.collect()
+    gc.freeze()
     # joueurs -> coachs par rang gauche->droite (formation de départ), ←/→ pour décaler
     fx, _ = coach.formation(video.src_w)
     offset, manual = 0, False      # manual : ←/→ utilisées, le choix ne suit plus le joueur seul
@@ -331,6 +376,8 @@ def run_game(disp, sess, song, n, log_path=None):
 
     state, stable_since, countdown_t0 = (LOBBY if group else CALIB), None, 0.0
     vsurf, vid_id = None, -1
+    pause_sel, resume_at = None, None   # menu pause ouvert (bouton sélectionné) ; fin du compte à rebours de reprise
+    focus_lost = (pygame.WINDOWFOCUSLOST, pygame.WINDOWMINIMIZED)
     outcome = None
     while outcome is None:
         now = time.perf_counter()
@@ -339,12 +386,36 @@ def run_game(disp, sess, song, n, log_path=None):
                 outcome = "quit"
             elif disp.handle(e):
                 L = relayout()
-            elif e.type == pygame.KEYDOWN and e.key == pygame.K_ESCAPE:
+            elif state == PLAY and pause_sel is not None and e.type in (pygame.KEYDOWN, pygame.MOUSEBUTTONDOWN,
+                                                                           pygame.MOUSEMOTION):
+                act = None
+                if e.type == pygame.KEYDOWN:
+                    if e.key in (pygame.K_ESCAPE, pygame.K_SPACE):
+                        act = "resume"
+                    elif e.key in (pygame.K_UP, pygame.K_DOWN):
+                        pause_sel = (pause_sel + (1 if e.key == pygame.K_DOWN else -1)) % len(PAUSE_ITEMS)
+                    elif e.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
+                        act = PAUSE_ITEMS[pause_sel][0]
+                else:
+                    hit = next((i for i, (_, _, r) in enumerate(pause_buttons(L["W"], L["H"]))
+                                if r.collidepoint(e.pos)), None)
+                    if hit is not None:
+                        pause_sel = hit
+                        if e.type == pygame.MOUSEBUTTONDOWN and e.button == 1:
+                            act = PAUSE_ITEMS[hit][0]
+                if act == "resume":                     # reprise après un compte à rebours de 3 s
+                    pause_sel, resume_at = None, now + 3.0
+                elif act:
+                    outcome = act
+            elif state == PLAY and (e.type == pygame.KEYDOWN and e.key in (pygame.K_ESCAPE, pygame.K_SPACE)
+                                    or e.type in focus_lost and cfg.pause_on_focus_loss):
+                if clock.paused_at is None:             # Échap par mégarde : pause, pas d'abandon
+                    clock.toggle_pause()
+                pause_sel, resume_at = 0, None
+            elif e.type == pygame.KEYDOWN and e.key == pygame.K_ESCAPE and state != PLAY:
                 outcome = "menu"
             elif e.type == pygame.KEYDOWN and e.key in (pygame.K_RETURN, pygame.K_KP_ENTER) and state == RESULTS:
                 outcome = "menu"
-            elif e.type == pygame.KEYDOWN and e.key == pygame.K_SPACE and state == PLAY:
-                clock.toggle_pause()
             elif e.type == pygame.KEYDOWN and e.key == pygame.K_s:
                 show_coach_skel = not show_coach_skel
             elif e.type == pygame.KEYDOWN and e.key == pygame.K_p:
@@ -403,6 +474,9 @@ def run_game(disp, sess, song, n, log_path=None):
                     cmap = assign_coaches(n, fx, coach.present.mean(0), offset)
                 manual = True
                 ccolors = hud.coach_colors(coach.n, cmap)
+        if resume_at is not None and now >= resume_at:
+            resume_at = None
+            clock.toggle_pause()
         if state != PLAY:       # poses inutilisées hors jeu (écran photo, résultats) : la file ne grossit pas
             while not worker.q.empty():
                 worker.q.get()
@@ -565,7 +639,14 @@ def run_game(disp, sess, song, n, log_path=None):
                 hud.group_results(screen, scores, team, titles)
             elif state == RESULTS:
                 hud.results(screen, scores, records)
+            elif pause_sel is not None:
+                draw_pause(screen, pause_sel)
+            elif resume_at is not None:
+                hud.text(screen, str(int(resume_at - now) + 1), 160, (255, 255, 255), (W // 2, H // 2), "center")
 
+        if state != RESULTS and now - cam.latest()[2] > 2.0:     # plus d'image depuis 2 s : câble débranché ?
+            hud.tag(screen, "Caméra perdue : vérifie le câble (reconnexion automatique)", 26, (255, 90, 90),
+                    (W // 2, H // 2 - px(120)), "center")
         pygame.display.flip()
         tick.tick(cfg.render_fps)
 
@@ -598,7 +679,8 @@ def main():
     disp = Display(a.fullscreen, tuple(int(v) for v in a.window.lower().split("x")), vsync=cfg.vsync)
     sess = Session(cfg)
     try:
-        run_game(disp, sess, a.song, a.players, a.log)
+        while run_game(disp, sess, a.song, a.players, a.log)[0] == "restart":
+            pass
     finally:
         sess.close()
         pygame.quit()

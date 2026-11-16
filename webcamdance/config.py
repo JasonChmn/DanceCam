@@ -19,6 +19,7 @@ class Config:
     render_fps: int = 60                    # images/s max de l'affichage (vidéo à 30 : chaque image montrée 2 fois)
     vsync: bool = True                      # synchro écran : images régulières, sans saccade ni déchirure
     show_pictos: bool = True                # bandeau des mouvements à venir (touche P en jeu)
+    pause_on_focus_loss: bool = True        # pause auto si la fenêtre perd le focus (Alt+Tab, notification)
     game_threads: int = 4                   # threads CPU en jeu (OpenCV, PyTorch) : 4 suffisent pour 30 i/s
     # --- caméra ---
     cam_index: int = 0

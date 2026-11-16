@@ -207,6 +207,9 @@ class VideoPlayer(threading.Thread):
         self.cap = cv2.VideoCapture(str(path))
         self.fps = self.cap.get(cv2.CAP_PROP_FPS) or 30.0
         vw, vh = self.cap.get(cv2.CAP_PROP_FRAME_WIDTH), self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
+        if not self.cap.isOpened() or vw <= 0 or vh <= 0:
+            self.cap.release()
+            raise RuntimeError(f"vidéo illisible ({Path(path).parent.name})")
         self.src_w = vw
         self.y0, self.y1 = int(band[0] * vh), max(int(band[0] * vh) + 2, int(band[1] * vh))
         self.set_fit(fit_size)

@@ -97,6 +97,16 @@ class BotCamera(threading.Thread):
 
 
 play.Camera = BotCamera
+_cfa = play.config_from_args
+
+
+def _config(a):
+    cfg = _cfa(a)
+    cfg.pause_on_focus_loss = False             # test sans surveillance : pas de pause si on change de fenêtre
+    return cfg
+
+
+play.config_from_args = _config
 _t0, _flip, _todo = time.perf_counter(), pygame.display.flip, sorted(B.shots)
 
 

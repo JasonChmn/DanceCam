@@ -160,19 +160,39 @@ class Importer:
         self.pending.clear()
         self.resume()               # un processus figé ne traiterait pas l'arrêt (Linux)
         if self.proc is not None:
+            children = self._tree()[1:]     # ffmpeg, yt-dlp… : sinon ils continuent seuls
             self.proc.terminate()
+            for c in children:
+                try:
+                    c.terminate()
+                except Exception:
+                    pass
             try:
                 self.proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 self.proc.kill()
+            for c in children:
+                try:
+                    c.wait(timeout=3)
+                except Exception:
+                    try:
+                        c.kill()
+                    except Exception:
+                        pass
 
 
-def clean_incomplete(songs_dir):
-    """Dossiers d'imports interrompus (sans meta.json) : à supprimer au démarrage."""
+def clean_incomplete(songs_dir, min_age=3600):
+    """Dossiers d'imports interrompus (sans meta.json) : à supprimer au démarrage. Ceux modifiés il y a
+    moins d'une heure sont gardés : un import_list lancé à côté est peut-être en train de les remplir."""
     import shutil
     root = Path(songs_dir)
     for d in root.iterdir() if root.is_dir() else []:
         if d.is_dir() and not d.name.startswith("_") and not (d / "meta.json").exists():
+            try:
+                if time.time() - d.stat().st_mtime < min_age:
+                    continue
+            except OSError:
+                continue
             shutil.rmtree(d, ignore_errors=True)
 
 
@@ -185,6 +205,16 @@ def filter_songs(songs, query):
     """Chansons dont le nom affiché contient tous les mots de la recherche (ordre libre)."""
     words = fold(query).split()
     return [s for s in songs if all(w in fold(display_name(s["meta"])) for w in words)]
+
+
+def fit_text(s, size, max_w, bold=False):
+    """Texte raccourci (…) pour tenir dans max_w pixels ; "" si rien ne tient."""
+    f = hud.font(size, bold)
+    if f.size(s)[0] <= max_w:
+        return s
+    while s and f.size(s + "…")[0] > max_w:
+        s = s[:-1]
+    return s.rstrip() + "…" if s else ""
 
 
 def fmt_dur(s):
@@ -245,7 +275,7 @@ class Menu:
         key = (song["path"], w, h)
         if key not in self._thumbs:
             p = library.thumbnail(song["path"])
-            img = cv2.imread(str(p)) if p else None
+            img = library.read_image(p) if p else None
             if img is None:
                 img = np.full((h, w, 3), 50, np.uint8)
             s = max(w / img.shape[1], h / img.shape[0])            # remplit puis recadre au centre
@@ -281,12 +311,18 @@ class Menu:
         song = self.songs[self.sel]
         self.importer.pause()
         try:
-            outcome, _, _ = run_game(self.disp, self.sess, song["path"], self.players)
-        except RuntimeError as err:
-            if self.sess.cam is not None:
-                raise
-            print(f"[menu] {err}")
-            self.say("Caméra indisponible : choisis-en une autre (C)")
+            outcome = "restart"
+            while outcome == "restart":             # « Recommencer » du menu pause
+                outcome, _, _ = run_game(self.disp, self.sess, song["path"], self.players)
+        except Exception as err:            # partie impossible : retour au menu, pas de fermeture du jeu
+            if self.sess.cam is None:
+                print(f"[menu] {err}")
+                self.say("Caméra indisponible : choisis-en une autre (C)")
+            else:
+                import traceback
+                traceback.print_exc()
+                self.say(f"Partie impossible : {str(err)[:70]}")
+            pygame.display.set_caption("WebcamDance")
             return
         finally:
             self.importer.resume()
@@ -542,10 +578,13 @@ class Menu:
             msg = "…" if not self.sess.cam_ready else "Aucune image"
             hud.text(s, msg, 16, (170, 170, 190), r.center, "center", bold=False, shadow=False)
         pygame.draw.rect(s, ACCENT if cam is not None else (200, 80, 80), r, px(2), border_radius=px(8))
-        hud.text(s, self.cam_name()[:28], 20, (220, 220, 230), (r.x - px(12), r.centery - px(11)), "midright",
-                 bold=False)
-        hint = "C : changer" if len(self.cams) > 1 else "Caméra"
-        hud.text(s, hint, 15, (150, 150, 170), (r.x - px(12), r.centery + px(13)), "midright", bold=False)
+        room = r.x - px(12) - getattr(self, "_logo_right", 0) - px(16)    # écran étroit (4:3) : pas sur le logo
+        full = self.cam_name()[:28]
+        name = fit_text(full, 20, room)
+        if name and (name == full or len(name) >= 10):     # nom trop rogné (« In… ») : rien plutôt qu'illisible
+            hud.text(s, name, 20, (220, 220, 230), (r.x - px(12), r.centery - px(11)), "midright", bold=False)
+            hint = "C : changer" if len(self.cams) > 1 else "Caméra"
+            hud.text(s, hint, 15, (150, 150, 170), (r.x - px(12), r.centery + px(13)), "midright", bold=False)
 
     def _add_rect(self):
         px = hud.px
@@ -579,7 +618,7 @@ class Menu:
         s, px = self.disp.screen, hud.px
         W, H = s.get_size()
         s.fill(BG)
-        hud.tag(s, "WebcamDance", 44, ACCENT, (px(24), px(14)), "topleft")
+        self._logo_right = hud.tag(s, "WebcamDance", 44, ACCENT, (px(24), px(14)), "topleft").right
         hud.text(s, "Joueurs", 22, (200, 200, 215), (self._chip_rects()[0][1].x - px(12), px(36)), "topright",
                  bold=False)
         for i, r in self._chip_rects():
@@ -633,11 +672,14 @@ class Menu:
         pygame.draw.rect(s, (30, 70, 90), ar, border_radius=px(10))
         pygame.draw.rect(s, ACCENT, ar, px(2), border_radius=px(10))
         hud.text(s, "+ Ajouter des chansons (A)", 22, (255, 255, 255), ar.center, "center")
-        hint = ("Entrée jouer · ↑/↓ choisir · 1-4 joueurs, 5 groupe · C caméra · R réglages · Suppr supprimer · "
-                "Ctrl+F rechercher · F11 plein écran · Échap quitter")
-        if hud.font(16, False).size(hint)[0] > W - px(30) - ar.right - px(24):     # ne pas chevaucher « Ajouter »
-            hint = "Entrée jouer · 1-4 joueurs, 5 groupe · C caméra · R réglages · Suppr · Ctrl+F · F11 · Échap"
-        hud.text(s, hint, 16, (150, 150, 170), (W - px(30), H - px(41)), "midright", bold=False)
+        hints = ["Entrée jouer · ↑/↓ choisir · 1-4 joueurs, 5 groupe · C caméra · R réglages · Suppr supprimer · "
+                 "Ctrl+F rechercher · F11 plein écran · Échap quitter",
+                 "Entrée jouer · 1-4 joueurs, 5 groupe · C caméra · R réglages · Suppr · Ctrl+F · F11 · Échap",
+                 "Entrée jouer · 1-5 joueurs · R réglages · Échap quitter"]
+        room = W - px(30) - ar.right - px(24)                                     # ne pas chevaucher « Ajouter »
+        hint = next((h for h in hints if hud.font(16, False).size(h)[0] <= room), "")
+        if hint:
+            hud.text(s, hint, 16, (150, 150, 170), (W - px(30), H - px(41)), "midright", bold=False)
         if self.flash and time.perf_counter() - self.flash_t < 3:
             hud.tag(s, self.flash, 22, (255, 255, 255), (W // 2, px(28)), "midtop")
         if self.mode == "add":
