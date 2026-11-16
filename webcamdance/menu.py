@@ -7,6 +7,7 @@ Touches : ↑/↓ choisir · Entrée jouer · 1-4 joueurs, 5 groupe · C caméra
 Ctrl+F rechercher · F11 plein écran · Échap quitter.
 """
 import argparse
+import os
 import queue
 import re
 import subprocess
@@ -40,6 +41,7 @@ class Importer:
         self.status = ""            # ligne d'état affichée
         self.done_count = self.fail_count = self.skip_count = self.rej_count = 0
         self.changed = False        # une chanson vient d'arriver : rafraîchir la liste
+        self.paused = False         # figé pendant une partie
         self._cur = {"k": 0, "n": 0, "title": "", "stage": ""}
 
     @property
@@ -63,8 +65,11 @@ class Importer:
         tmp.write_text("\n".join(links), encoding="utf-8")
         cmd = [sys.executable, "-u", "-m", "webcamdance.import_song", "--songs-dir", str(self.songs_dir), "-y"]
         cmd += ["--playlist", *links] if playlist else ["--links-file", str(tmp)]
+        # UTF-8 forcé : sous Windows, la sortie d'un processus vers un tube est sinon en cp1252
+        # (accents illisibles ici, et plantage sur un titre hors cp1252)
+        env = dict(os.environ, PYTHONUTF8="1", PYTHONIOENCODING="utf-8")
         self.proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-                                     encoding="utf-8", errors="replace", bufsize=1)
+                                     encoding="utf-8", errors="replace", bufsize=1, env=env)
         self._tmp = tmp
         threading.Thread(target=self._read, args=(self.proc,), daemon=True).start()
         self._cur = {"k": 0, "n": len(links) if not playlist else 0, "title": "", "stage": "démarrage"}
@@ -119,8 +124,41 @@ class Importer:
             c["stage"] = "déjà présente"
             self.skip_count += 1
 
+    def _tree(self):
+        """Processus d'import et ses enfants (ffmpeg, yt-dlp…), ou [] s'il est fini."""
+        try:
+            import psutil
+            p = psutil.Process(self.proc.pid)
+            return [p] + p.children(recursive=True)
+        except Exception:
+            return []
+
+    def pause(self):
+        """Partie lancée : l'import est figé (GPU et CPU rendus au jeu), sans perdre son avancement."""
+        if self.proc is None or self.paused:
+            return
+        self.paused = True
+        for p in self._tree():      # parent d'abord : il ne peut plus lancer de nouvel enfant
+            try:
+                p.suspend()
+            except Exception:
+                pass
+
+    def resume(self):
+        if not self.paused:
+            return
+        self.paused = False
+        if self.proc is None:
+            return
+        for p in reversed(self._tree()):
+            try:
+                p.resume()
+            except Exception:
+                pass
+
     def stop(self):
         self.pending.clear()
+        self.resume()               # un processus figé ne traiterait pas l'arrêt (Linux)
         if self.proc is not None:
             self.proc.terminate()
             try:
@@ -241,6 +279,7 @@ class Menu:
         if not self.songs:
             return
         song = self.songs[self.sel]
+        self.importer.pause()
         try:
             outcome, _, _ = run_game(self.disp, self.sess, song["path"], self.players)
         except RuntimeError as err:
@@ -249,8 +288,10 @@ class Menu:
             print(f"[menu] {err}")
             self.say("Caméra indisponible : choisis-en une autre (C)")
             return
+        finally:
+            self.importer.resume()
+            pygame.key.set_repeat(300, 40)      # coupée pendant la partie
         pygame.display.set_caption("WebcamDance")
-        pygame.key.set_repeat(300, 40)
         self.refresh()
         if outcome == "quit":
             pygame.event.post(pygame.event.Event(pygame.QUIT))
@@ -592,9 +633,11 @@ class Menu:
         pygame.draw.rect(s, (30, 70, 90), ar, border_radius=px(10))
         pygame.draw.rect(s, ACCENT, ar, px(2), border_radius=px(10))
         hud.text(s, "+ Ajouter des chansons (A)", 22, (255, 255, 255), ar.center, "center")
-        hud.text(s, "Entrée jouer · ↑/↓ choisir · 1-4 joueurs, 5 groupe · C caméra · R réglages · Suppr supprimer · Ctrl+F rechercher · "
-                 "F11 plein écran · Échap quitter",
-                 16, (150, 150, 170), (W - px(30), H - px(41)), "midright", bold=False)
+        hint = ("Entrée jouer · ↑/↓ choisir · 1-4 joueurs, 5 groupe · C caméra · R réglages · Suppr supprimer · "
+                "Ctrl+F rechercher · F11 plein écran · Échap quitter")
+        if hud.font(16, False).size(hint)[0] > W - px(30) - ar.right - px(24):     # ne pas chevaucher « Ajouter »
+            hint = "Entrée jouer · 1-4 joueurs, 5 groupe · C caméra · R réglages · Suppr · Ctrl+F · F11 · Échap"
+        hud.text(s, hint, 16, (150, 150, 170), (W - px(30), H - px(41)), "midright", bold=False)
         if self.flash and time.perf_counter() - self.flash_t < 3:
             hud.tag(s, self.flash, 22, (255, 255, 255), (W // 2, px(28)), "midtop")
         if self.mode == "add":

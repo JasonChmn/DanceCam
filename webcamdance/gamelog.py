@@ -27,7 +27,7 @@ class GameLog:
         self._t_perf, self._cam_fid = now, fid
         self.write("perf", t=round(t, 3), render_fps=round(tick.get_fps(), 1), infer_ms=round(worker.infer_ms, 2),
                    cam_fps=None if cam_fps is None else round(cam_fps, 1), video_lag_frames=video_lag,
-                   visible=worker.n_visible)
+                   visible=worker.n_visible, errors=getattr(worker, "errors", 0))
 
     def track(self, t, poses, thr):
         """Position x (milieu des épaules) de chaque slot : repère les échanges d'identité."""

@@ -26,6 +26,7 @@ def set_scale(height):
     U = height / 720
     _fonts.clear()
     _tags.clear()
+    _render_cache_clear()
 
 
 def px(v):
@@ -107,6 +108,28 @@ def bgr_surface(frame):
     return pygame.image.frombuffer(frame.tobytes(), (w, h), "BGR")
 
 
+# Caches de rendu : l'affichage tourne à 60 i/s mais caméra et vidéo changent à 30 i/s ; on ne
+# refait le travail (redimensionnement, halo, calque des coachs) que si l'image source a changé.
+_frames = {}    # taille -> (image source, surface redimensionnée)
+_tiles = {}     # joueur -> (image, pose, taille, surface | None, vu ?)
+_ov = {}        # calque des squelettes coachs : {"key", "layer"}
+
+
+def _render_cache_clear():
+    _frames.clear()
+    _tiles.clear()
+    _ov.clear()
+
+
+def frame_surface(frame, size):
+    """Image BGR redimensionnée en Surface, recalculée seulement si l'image (objet) ou la taille change."""
+    c = _frames.get(size)
+    if c is None or c[0] is not frame:
+        c = (frame, bgr_surface(cv2.resize(frame, size)))
+        _frames[size] = c
+    return c[1]
+
+
 def skeleton(surf, kp, color, thr, scale, off, width=3):
     # float() : pygame-ce refuse les numpy.float32 comme coordonnées
     pts = [(off[0] + float(x) * scale, off[1] + float(y) * scale) for x, y, _ in kp]
@@ -122,7 +145,7 @@ def webcam(surf, frame, poses, rect, thr):
     """Vignette webcam (déjà miroir) + squelettes colorés par slot."""
     if frame is None:
         return
-    surf.blit(bgr_surface(cv2.resize(frame, rect.size)), rect)
+    surf.blit(frame_surface(frame, rect.size), rect)
     s = rect.w / frame.shape[1]
     for i, kp in enumerate(poses):
         if kp is not None:
@@ -183,16 +206,19 @@ def coach_overlay(surf, coach, idx, rect, scale, y0, thr, colors, skel=True, alp
     kpts = coach.kpts[idx]
     to_scr = lambda x, y: (rect.x + float(x) * scale, rect.y + (float(y) - y0) * scale)
     if skel:
-        layer = pygame.Surface(rect.size, pygame.SRCALPHA)
-        for c, kp in enumerate(kpts):
-            ok = kp[:, 2] >= thr
-            if ok.sum() < 5:
-                continue
-            pts = [(float(x) * scale, (float(y) - y0) * scale) for x, y, _ in kp]
-            for a, b in EDGES:
-                if ok[a] and ok[b]:
-                    pygame.draw.line(layer, (*colors[c][0], alpha), pts[a], pts[b], px(3))
-        surf.blit(layer, rect)
+        key = (idx, rect.size, scale, y0, thr, alpha, tuple(col for col, _ in colors))
+        if _ov.get("key") != key:       # recalculé à chaque image vidéo (30 i/s), pas à chaque affichage
+            layer = pygame.Surface(rect.size, pygame.SRCALPHA)
+            for c, kp in enumerate(kpts):
+                ok = kp[:, 2] >= thr
+                if ok.sum() < 5:
+                    continue
+                pts = [(float(x) * scale, (float(y) - y0) * scale) for x, y, _ in kp]
+                for a, b in EDGES:
+                    if ok[a] and ok[b]:
+                        pygame.draw.line(layer, (*colors[c][0], alpha), pts[a], pts[b], px(3))
+            _ov["key"], _ov["layer"] = key, layer
+        surf.blit(_ov["layer"], rect)
     for c, (col, label) in enumerate(colors):
         if not label:
             continue
@@ -267,11 +293,14 @@ _crops = {}     # joueur -> [cx, cy, h] cadrage lissé dans la webcam (px source
 
 
 def reset_crops():
+    """Début de partie : cadrages et caches de rendu remis à zéro (nouvelle chanson, nouveaux joueurs)."""
     _crops.clear()
+    _render_cache_clear()
 
 
-def _crop_box(i, kp, thr, fh, aspect=0.75, margin=1.3, alpha=0.25):
-    """Cadrage portrait lissé autour du squelette du joueur i. -> ([cx, cy, h] ou None, vu ?)."""
+def _crop_box(i, kp, thr, fh, aspect=0.75, margin=1.3, alpha=0.44):
+    """Cadrage portrait lissé autour du squelette du joueur i. -> ([cx, cy, h] ou None, vu ?).
+    Appelé une fois par image caméra (30 i/s) : alpha 0,44 = même lissage que 0,25 à 60 i/s."""
     st = _crops.get(i)
     if kp is not None:
         ok = kp[:, 2] >= thr
@@ -315,6 +344,25 @@ def _halo(surf, rect, pts, ok, col):
     surf.blit(pygame.transform.smoothscale(half, rect.size), rect, special_flags=pygame.BLEND_RGB_ADD)
 
 
+def _player_tile(i, frame, kp, size, thr, col):
+    """Mini-fenêtre du joueur i (recadrage + halo + squelette). -> (surface | None, vu ?)"""
+    box, live = (None, False) if frame is None else _crop_box(i, kp, thr, frame.shape[0])
+    if box is None:
+        return None, False
+    img, (ox, oy, s) = _extract(frame, box, size)
+    if not live:
+        img = (img * 0.35).astype(np.uint8)
+    tile = bgr_surface(img).copy()          # copie : on dessine dessus
+    if live:
+        pts = [((float(x) - ox) * s, (float(y) - oy) * s) for x, y, _ in kp]
+        ok = kp[:, 2] >= thr
+        _halo(tile, tile.get_rect(), pts, ok, col)
+        for a, b in EDGES:
+            if ok[a] and ok[b]:
+                pygame.draw.line(tile, col, pts[a], pts[b], px(2))
+    return tile, live
+
+
 def player_strip(surf, rect, frame, poses, scores, t, thr, waiting=None):
     """Bande du bas : une mini-fenêtre par joueur, recadrée sur lui (halo + squelette),
     jugement au-dessus, score / combo / étoiles en dessous."""
@@ -333,19 +381,13 @@ def player_strip(surf, rect, frame, poses, scores, t, thr, waiting=None):
         col = pcolor(i)
         vr = pygame.Rect(int(rect.x + (i + 0.5) * col_w - vw / 2), rect.y + top, vw, vh)
         kp = poses[i] if i < len(poses) else None
-        box, live = (None, False) if frame is None else _crop_box(i, kp, thr, frame.shape[0])
-        if box is not None:
-            img, (ox, oy, s) = _extract(frame, box, vr.size)
-            if not live:
-                img = (img * 0.35).astype(np.uint8)
-            surf.blit(bgr_surface(img), vr)
-            if live:
-                pts = [(vr.x + (float(x) - ox) * s, vr.y + (float(y) - oy) * s) for x, y, _ in kp]
-                ok = kp[:, 2] >= thr
-                _halo(surf, vr, pts, ok, col)
-                for a, b in EDGES:
-                    if ok[a] and ok[b]:
-                        pygame.draw.line(surf, col, pts[a], pts[b], px(2))
+        st = _tiles.get(i)
+        if st is None or st[0] is not frame or st[1] is not kp or st[2] != vr.size:
+            st = (frame, kp, vr.size) + _player_tile(i, frame, kp, vr.size, thr, col)
+            _tiles[i] = st
+        tile, live = st[3], st[4]
+        if tile is not None:
+            surf.blit(tile, vr)
         else:
             pygame.draw.rect(surf, (24, 24, 40), vr, border_radius=px(8))
         pygame.draw.rect(surf, col, vr, px(3), border_radius=px(8))

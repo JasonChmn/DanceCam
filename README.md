@@ -82,7 +82,9 @@ Stockage : vidéo recadrée sur le bandeau des coachs, 720p H.264 (~30–40 Mo p
 ### Réglages (webcamdance/config.py)
 - `cam_latency` / `--latency-ms` : si les jugements semblent en retard/avance.
 - `judgements` : seuils calés sur le bot (imitation parfaite ≈ 94 % PERFECT, danse fausse ≈ 74 % MISS).
-- TensorRT : `yolo export model=yolo26s-pose.pt format=engine half=True imgsz=640` puis `--model yolo26s-pose.engine`.
+- TensorRT : `yolo export model=yolo26s-pose.pt format=engine half=True dynamic=True imgsz=960` puis
+  `--model yolo26s-pose.engine`. `dynamic=True` obligatoire : le jeu utilise 640, et 960 en mode groupe
+  (un `.engine` à taille fixe refuse l'autre taille ; `imgsz` = taille maximale).
 
 ### Tests
 ```

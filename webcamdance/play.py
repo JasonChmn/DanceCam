@@ -84,8 +84,16 @@ class Display:
     def __init__(self, fullscreen=False, window=(1280, 720), caption="WebcamDance", vsync=True):
         self.fullscreen, self.window, self.vsync = fullscreen, window, vsync
         self.screen = open_display(fullscreen, window, vsync)
+        self._check_vsync()
         pygame.display.set_caption(caption)
         hud.set_scale(self.screen.get_height())
+
+    def _check_vsync(self):
+        """vsync réellement obtenu ? (le pilote peut le refuser : repli silencieux sinon)"""
+        is_vsync = getattr(pygame.display, "is_vsync", None)
+        self.vsync_on = bool(is_vsync()) if is_vsync and self.vsync else False
+        if self.vsync and not self.vsync_on:
+            print("[affichage] vsync refusé par le pilote : affichage sans synchro écran")
 
     def handle(self, e):
         """Traite redimensionnement / F11. -> True si la taille a changé (refaire la mise en page)."""
@@ -102,6 +110,7 @@ class Display:
         if vsync is not None:
             self.vsync = vsync
         self.screen = open_display(self.fullscreen, self.window, self.vsync)
+        self._check_vsync()
         hud.set_scale(self.screen.get_height())
 
     def message(self, s):
@@ -123,6 +132,15 @@ class Session:
         self._want, self._done, self._closing = (cfg.cam_index, 0), None, False
         self._cam_thread = threading.Thread(target=self._cam_loop, daemon=True)
         self._cam_thread.start()
+        # modèle de pose chargé en fond dès le démarrage (plusieurs secondes avec CUDA)
+        self._pose_thread = threading.Thread(target=self._load_pose, daemon=True)
+        self._pose_thread.start()
+
+    def _load_pose(self):
+        try:
+            self.pose = PoseEstimator(self.cfg.rt_model, self.cfg)
+        except Exception as e:      # erreur relancée par ensure(), au lancement d'une partie
+            print(f"[pose] chargement du modèle impossible : {e}")
 
     @property
     def cam_ready(self):
@@ -165,7 +183,8 @@ class Session:
             self._cond.wait_for(lambda: self.cam_ready)
         if self.cam is None:
             raise RuntimeError(self.cam_error or "Webcam inaccessible")
-        if self.pose is None:
+        self._pose_thread.join()
+        if self.pose is None:       # échec du préchargement : nouvel essai (l'erreur remonte ici)
             self.pose = PoseEstimator(self.cfg.rt_model, self.cfg)
 
     def close(self):
@@ -173,6 +192,8 @@ class Session:
             self._closing = True
             self._cond.notify_all()
         self._cam_thread.join(timeout=3)
+        # quitter pendant le préchargement du modèle : attendre sa fin (sinon plantage natif à la sortie)
+        self._pose_thread.join(timeout=60)
 
 
 def photo_rect(W, H):
@@ -238,12 +259,13 @@ def run_game(disp, sess, song, n, log_path=None):
     meta = json.loads((song / "meta.json").read_text(encoding="utf-8"))
     pygame.display.set_caption(f"WebcamDance — {meta['title']}")
     sess.ensure(disp)
+    pygame.key.set_repeat()         # pas de répétition en jeu (Espace maintenu = pause/reprise en boucle)
     disp.message("Chargement de la chanson…")
     coach = CoachTrack(song / "poses.npz", cfg)
     pictos = Pictos(coach.kpts, coach.fps, cfg.kpt_conf)
     scores, records = [], []        # scores créés au démarrage de la musique (association figée)
     log = GameLog(log_path or Path("logs") / f"{song.name}_{time.strftime('%Y%m%d-%H%M%S')}.jsonl",
-                  song=str(song), players=n, group=group, cfg=dataclasses.asdict(cfg))
+                  song=str(song), players=n, group=group, vsync=disp.vsync_on, cfg=dataclasses.asdict(cfg))
     cam = sess.cam
     worker = PlayerWorker(cam, sess.pose, cfg, n, group=group); worker.start()
     W, H = disp.screen.get_size()
@@ -331,14 +353,16 @@ def run_game(disp, sess, song, n, log_path=None):
                                                or e.type == pygame.MOUSEBUTTONDOWN and e.button == 1
                                                and L["count_btn"].collidepoint(e.pos)):
                 state, snap_t0 = SNAP, now
-            elif group and state == PHOTO and e.type in (pygame.KEYDOWN, pygame.MOUSEBUTTONDOWN):
+            elif group and state == PHOTO and (e.type == pygame.KEYDOWN
+                                               or e.type == pygame.MOUSEBUTTONDOWN and e.button in (1, 3)):
                 act = None
                 if e.type == pygame.KEYDOWN:
                     act = {pygame.K_RETURN: "start", pygame.K_KP_ENTER: "start", pygame.K_r: "redo",
                            pygame.K_t: "same", pygame.K_LEFT: "left", pygame.K_RIGHT: "right"}.get(e.key)
-                else:
-                    act = next((k for k, _, r in L["btns"] if r.collidepoint(e.pos)), None)
-                    i = None if act else person_at(photo, L["photo"], e.pos)
+                else:   # boutons : clic gauche seulement (ni clic droit ni molette)
+                    btn = next((k for k, _, r in L["btns"] if r.collidepoint(e.pos)), None)
+                    act = btn if e.button == 1 else None
+                    i = None if btn else person_at(photo, L["photo"], e.pos)
                     if i is not None and e.button == 3:                 # clic droit : retirer / ajouter
                         act = None
                         if i in sel:
@@ -379,6 +403,9 @@ def run_game(disp, sess, song, n, log_path=None):
                     cmap = assign_coaches(n, fx, coach.present.mean(0), offset)
                 manual = True
                 ccolors = hud.coach_colors(coach.n, cmap)
+        if state != PLAY:       # poses inutilisées hors jeu (écran photo, résultats) : la file ne grossit pas
+            while not worker.q.empty():
+                worker.q.get()
         screen = disp.screen
         frame, poses = worker.view
         t = clock.time()
@@ -389,7 +416,7 @@ def run_game(disp, sess, song, n, log_path=None):
             hud.coach_thumbs_row(screen, L["thumbs"], fx, [(hud.NEUTRAL, "")] * coach.n, L["row"])
             pr, raw = L["photo"], worker.raw
             if raw is not None:
-                screen.blit(hud.bgr_surface(cv2.resize(raw[0], pr.size)), pr)
+                screen.blit(hud.frame_surface(raw[0], pr.size), pr)
                 up = [arms_up(kp, cfg.kpt_conf) for kp in raw[2]]
                 draw_people(screen, raw[0], raw[2], pr, cfg.kpt_conf,
                             [((118, 255, 3), px(5), None) if u else ((150, 150, 165), px(2), None) for u in up])
@@ -510,6 +537,7 @@ def run_game(disp, sess, song, n, log_path=None):
                         team.update()
                         titles = fun_titles(scores)
                     state = RESULTS
+                    worker.stop()           # plus besoin des poses : GPU libéré
                     log.close(scores)
                     records = library.save_result(song, scores, n)
                     print(f"[play] journal : {log.path}")

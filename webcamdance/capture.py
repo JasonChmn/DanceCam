@@ -3,6 +3,7 @@ import queue
 import sys
 import threading
 import time
+import traceback
 
 import cv2
 import numpy as np
@@ -73,6 +74,8 @@ class PlayerWorker(threading.Thread):
         self.infer_ms = 0.0
         self._lock_req = False
         self._cmds = []         # commandes du mode groupe, exécutées dans le thread
+        self.errors = 0         # erreurs rattrapées (journalisées) : le suivi continue
+        self._last = -1
         self._halt = False
 
     def _infer(self, frame):
@@ -119,53 +122,63 @@ class PlayerWorker(threading.Thread):
             self.view = (self.view[0], [None] * self.n)
 
     def run(self):
-        last, thr = -1, self.cfg.kpt_conf
         while not self._halt:
-            if self._cmds:
-                self._run_cmds()
-            fid, frame, t = self.cam.latest()
-            if fid == last:
-                time.sleep(0.001)
-                continue
-            last = fid
-            n = self.n
-            t0 = time.perf_counter()
-            kpts, boxes, _ = self._infer(frame)[0]
-            self.infer_ms += 0.1 * ((time.perf_counter() - t0) * 1e3 - self.infer_ms)
-            if self.group:
-                # rangées : les joueurs du fond paraissent petits (jambes cachées) -> seuil de taille bas
-                idx = select_people(boxes, self.FREE_MAX if self.tracker is None else n + 4, min_rel_h=0.2)
-            else:
-                idx = select_people(boxes, n + 1)
-            kpts, boxes = kpts[idx], boxes[idx]
-            centers, scales = centers_scales(kpts, boxes, thr)
-            sigs = signatures(frame, kpts, thr)          # couleur de tenue (~1 ms)
-            self.n_visible = min(len(idx), n) if n else len(idx)
+            try:
+                self._step()
+            except Exception:       # une frame en erreur ne doit pas arrêter le suivi (sinon jeu figé)
+                self.errors += 1
+                if self.errors <= 3:
+                    print("[capture] erreur dans le suivi des joueurs :")
+                    traceback.print_exc()
+                time.sleep(0.05)
 
-            if self.group and self.tracker is None:     # mode libre : tout le monde, gauche->droite
-                o = np.argsort(centers[:, 0]) if len(idx) else np.zeros(0, int)
-                self.raw = (frame, t, kpts[o], boxes[o], sigs[o], centers[o], scales[o])
-                self.view = (frame, list(kpts[o]))
-                continue
+    def _step(self):
+        thr = self.cfg.kpt_conf
+        if self._cmds:
+            self._run_cmds()
+        fid, frame, t = self.cam.latest()
+        if fid == self._last:
+            time.sleep(0.001)
+            return
+        self._last = fid
+        n = self.n
+        t0 = time.perf_counter()
+        kpts, boxes, _ = self._infer(frame)[0]
+        self.infer_ms += 0.1 * ((time.perf_counter() - t0) * 1e3 - self.infer_ms)
+        if self.group:
+            # rangées : les joueurs du fond paraissent petits (jambes cachées) -> seuil de taille bas
+            idx = select_people(boxes, self.FREE_MAX if self.tracker is None else n + 4, min_rel_h=0.2)
+        else:
+            idx = select_people(boxes, n + 1)
+        kpts, boxes = kpts[idx], boxes[idx]
+        centers, scales = centers_scales(kpts, boxes, thr)
+        sigs = signatures(frame, kpts, thr)          # couleur de tenue (~1 ms)
+        self.n_visible = min(len(idx), n) if n else len(idx)
 
-            if not self.tracker.ready:  # calibration : ordre provisoire gauche->droite
-                top = np.arange(min(n, len(idx)))
-                order = top[np.argsort(centers[top, 0])] if len(top) else top
-                poses = [kpts[j] for j in order] + [None] * (n - len(order))
-                if self._lock_req and len(order) == n and not np.isnan(sigs[order]).any():
-                    self.tracker.init(centers[order], scales[order], sigs[order], t)
-                self.view = (frame, poses)
-                continue
+        if self.group and self.tracker is None:     # mode libre : tout le monde, gauche->droite
+            o = np.argsort(centers[:, 0]) if len(idx) else np.zeros(0, int)
+            self.raw = (frame, t, kpts[o], boxes[o], sigs[o], centers[o], scales[o])
+            self.view = (frame, list(kpts[o]))
+            return
 
-            poses = []
-            for i, j in enumerate(self.tracker.update(centers, scales, sigs, t, overlap_frac(boxes))):
-                if j is None:
-                    if t - self.tracker.seen[i] > 0.5:
-                        self.filters[i] = OneEuro()
-                    poses.append(None)
-                    continue
-                kp = kpts[j].copy()
-                kp[:, :2] = self.filters[i](kp[:, :2], t, mask=kp[:, 2:3] >= thr)
-                poses.append(kp)
+        if not self.tracker.ready:  # calibration : ordre provisoire gauche->droite
+            top = np.arange(min(n, len(idx)))
+            order = top[np.argsort(centers[top, 0])] if len(top) else top
+            poses = [kpts[j] for j in order] + [None] * (n - len(order))
+            if self._lock_req and len(order) == n and not np.isnan(sigs[order]).any():
+                self.tracker.init(centers[order], scales[order], sigs[order], t)
             self.view = (frame, poses)
-            self.q.put((t, poses))
+            return
+
+        poses = []
+        for i, j in enumerate(self.tracker.update(centers, scales, sigs, t, overlap_frac(boxes))):
+            if j is None:
+                if t - self.tracker.seen[i] > 0.5:
+                    self.filters[i] = OneEuro()
+                poses.append(None)
+                continue
+            kp = kpts[j].copy()
+            kp[:, :2] = self.filters[i](kp[:, :2], t, mask=kp[:, 2:3] >= thr)
+            poses.append(kp)
+        self.view = (frame, poses)
+        self.q.put((t, poses))

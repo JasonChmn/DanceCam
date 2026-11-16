@@ -229,23 +229,35 @@ class VideoPlayer(threading.Thread):
         self._halt = True
 
     def run(self):
+        errors = 0
         while not self._halt:
-            tgt = self.target
-            if self.idx >= tgt:
-                time.sleep(0.002)
-                continue
-            while self.idx < tgt - 1 and self.cap.grab():
-                self.idx += 1
-            ok, f = self.cap.read()
-            if not ok:
+            try:
+                self._step()
+            except Exception:       # une image en erreur ne doit pas figer la vidéo pour le reste de la partie
+                errors += 1
+                if errors <= 3:
+                    import traceback
+                    print("[video] erreur de décodage / affichage :")
+                    traceback.print_exc()
                 time.sleep(0.05)
-                continue
-            self.idx += 1
-            f = upscale(f[self.y0:self.y1], self.size)
-            if self.coach_kpts is not None and self.dim < 1 and self.idx < len(self.coach_kpts):
-                spotlight(f, self.coach_kpts[self.idx], self.scale, self.y0, self.thr, self.dim)
-            self.frame, self.frame_id = f, self.idx
         self.cap.release()
+
+    def _step(self):
+        tgt = self.target
+        if self.idx >= tgt:
+            time.sleep(0.002)
+            return
+        while self.idx < tgt - 1 and self.cap.grab():
+            self.idx += 1
+        ok, f = self.cap.read()
+        if not ok:
+            time.sleep(0.05)
+            return
+        self.idx += 1
+        f = upscale(f[self.y0:self.y1], self.size)
+        if self.coach_kpts is not None and self.dim < 1 and self.idx < len(self.coach_kpts):
+            spotlight(f, self.coach_kpts[self.idx], self.scale, self.y0, self.thr, self.dim)
+        self.frame, self.frame_id = f, self.idx
 
 
 class SongClock:
