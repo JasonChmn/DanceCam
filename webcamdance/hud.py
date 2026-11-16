@@ -7,10 +7,16 @@ import pygame
 
 from .skeleton import EDGES
 
-COLORS = [(0, 229, 255), (255, 64, 160), (255, 214, 0), (118, 255, 3)]
+COLORS = [(0, 229, 255), (255, 64, 160), (255, 214, 0), (118, 255, 3),     # 1 couleur par joueur (8 max)
+          (255, 140, 30), (175, 120, 255), (240, 240, 250), (60, 120, 255)]
 JUDGE_COL = {"PERFECT": (255, 215, 64), "SUPER": (118, 255, 3), "GOOD": (0, 229, 255),
              "OK": (200, 200, 210), "MISS": (255, 70, 70)}
 _fonts = {}
+
+
+def pcolor(i):
+    return COLORS[i % len(COLORS)]
+
 U = 1.0     # échelle d'interface = hauteur écran / 720 ; tailles du code en « pixels 720p »
 
 
@@ -120,9 +126,9 @@ def webcam(surf, frame, poses, rect, thr):
     s = rect.w / frame.shape[1]
     for i, kp in enumerate(poses):
         if kp is not None:
-            skeleton(surf, kp, COLORS[i % 4], thr, s, rect.topleft, max(2, rect.w // 200))
+            skeleton(surf, kp, pcolor(i), thr, s, rect.topleft, max(2, rect.w // 200))
             x, y = rect.x + float(kp[5:7, 0].mean()) * s, rect.y + float(kp[5:7, 1].min()) * s
-            tag(surf, f"P{i + 1}", max(18, rect.w // 20), COLORS[i % 4], (x, y - rect.h * 0.12), "midbottom")
+            tag(surf, f"P{i + 1}", max(18, rect.w // 20), pcolor(i), (x, y - rect.h * 0.12), "midbottom")
     pygame.draw.rect(surf, (255, 255, 255), rect, px(2), border_radius=px(6))
 
 
@@ -141,7 +147,7 @@ def results(surf, scores, records=()):
     best = max(s.total for s in scores)
     n = len(scores)
     for i, sc in enumerate(scores):
-        cx, col = int((i + 0.5) * W / n), COLORS[i % 4]
+        cx, col = int((i + 0.5) * W / n), pcolor(i)
         text(surf, f"P{i + 1}" + ("  ♛" if sc.total == best and n > 1 else ""), 40, col, (cx, px(190)), "midtop")
         text(surf, f"{sc.total:,}".replace(",", " "), 64, (255, 255, 255), (cx, px(240)), "midtop")
         if i < len(records) and records[i]:
@@ -165,7 +171,8 @@ def coach_colors(n_coach, cmap):
     out = []
     for c in range(n_coach):
         ps = [p for p, cc in enumerate(cmap) if cc == c]
-        out.append((COLORS[ps[0] % 4], " ".join(f"P{p + 1}" for p in ps)) if ps else (NEUTRAL, ""))
+        label = "Tous" if len(ps) == len(cmap) >= 5 else " ".join(f"P{p + 1}" for p in ps)
+        out.append((pcolor(ps[0]), label) if ps else (NEUTRAL, ""))
     return out
 
 
@@ -323,7 +330,7 @@ def player_strip(surf, rect, frame, poses, scores, t, thr, waiting=None):
         vw = int(col_w - px(24))
         vh = int(vw / 0.75)
     for i, sc in enumerate(scores):
-        col = COLORS[i % 4]
+        col = pcolor(i)
         vr = pygame.Rect(int(rect.x + (i + 0.5) * col_w - vw / 2), rect.y + top, vw, vh)
         kp = poses[i] if i < len(poses) else None
         box, live = (None, False) if frame is None else _crop_box(i, kp, thr, frame.shape[0])
@@ -357,3 +364,87 @@ def player_strip(surf, rect, frame, poses, scores, t, thr, waiting=None):
         # jugement juste au-dessus de la mini-fenêtre
         if sc.last and 0 <= t - sc.last[1] < 0.9:
             judge_pop(surf, sc.last[0], t - sc.last[1], (vr.centerx, vr.y + px(6)), 34, surf.get_rect())
+
+
+# ---------------------------------------------------------------- mode groupe (5+)
+def group_strip(surf, rect, frame, poses, scores, team, t, thr):
+    """Bande du bas en groupe : webcam entière (squelettes + P1…Pn, jugements au-dessus des
+    têtes) à gauche ; à droite la jauge d'équipe, le combo d'équipe et une pastille par joueur."""
+    pygame.draw.rect(surf, (10, 10, 22), rect)
+    pad = px(8)
+    ch = rect.h - 2 * pad
+    cw = int(ch * 16 / 9)
+    cam = pygame.Rect(rect.x + pad, rect.y + pad, min(cw, rect.w // 2), ch)
+    if frame is not None:
+        webcam(surf, frame, poses, cam, thr)
+        s = cam.w / frame.shape[1]
+        for i, sc in enumerate(scores):
+            kp = poses[i] if i < len(poses) else None
+            if kp is None or not sc.last or not 0 <= t - sc.last[1] < 0.9 or (kp[5:7, 2] < thr).any():
+                continue
+            x, y = cam.x + float(kp[5:7, 0].mean()) * s, cam.y + float(kp[5:7, 1].min()) * s
+            judge_pop(surf, sc.last[0], t - sc.last[1], (x, y - cam.h * 0.22), 18, cam)
+    # équipe
+    right = pygame.Rect(cam.right + px(16), rect.y + pad, rect.right - cam.right - px(24), ch)
+    text(surf, "ÉQUIPE", 22, (220, 220, 235), (right.x, right.y), "topleft")
+    text(surf, f"{team.total:,}".replace(",", " "), 34, (255, 255, 255), (right.right, right.y - px(4)), "topright")
+    g = pygame.Rect(right.x, right.y + px(40), right.w, px(14))
+    pygame.draw.rect(surf, (60, 60, 80), g, border_radius=g.h // 2)
+    pygame.draw.rect(surf, (255, 215, 64), (g.x, g.y, int(g.w * min(1.0, team.ratio / 0.8)), g.h), border_radius=g.h // 2)
+    for k in range(1, 6):
+        star(surf, g.x + g.w * k / 5 - px(3), g.centery, px(11), (255, 215, 64) if team.stars >= k else (110, 110, 130))
+    if team.combo >= 2:
+        age = t - team.last[1] if team.last else 9
+        size = 26 if age > 0.3 else 34
+        tag(surf, f"COMBO D'ÉQUIPE x{team.combo}", size, (255, 215, 64), (right.centerx, g.bottom + px(8)), "midtop")
+    # pastilles joueurs : 4 par ligne
+    n = len(scores)
+    cols = min(4, max(1, n))
+    rows = (n + cols - 1) // cols
+    top = g.bottom + px(52)
+    chip_h = min(px(44), (right.bottom - top) // max(1, rows) - px(6))
+    chip_w = right.w / cols
+    for i, sc in enumerate(scores):
+        r = pygame.Rect(int(right.x + (i % cols) * chip_w), top + (i // cols) * (chip_h + px(6)),
+                        int(chip_w) - px(6), chip_h)
+        col = pcolor(i)
+        pygame.draw.rect(surf, (24, 24, 40), r, border_radius=px(8))
+        pygame.draw.rect(surf, col, r, px(2), border_radius=px(8))
+        text(surf, f"P{i + 1}", 18, col, (r.x + px(6), r.centery), "midleft", shadow=False)
+        recent = sc.last and 0 <= t - sc.last[1] < 0.9
+        if recent:
+            text(surf, sc.last[0], 14, JUDGE_COL[sc.last[0]], (r.right - px(6), r.centery), "midright", shadow=False)
+        else:
+            text(surf, f"{sc.total:,}".replace(",", " "), 16, (230, 230, 240), (r.right - px(6), r.centery),
+                 "midright", bold=False, shadow=False)
+
+
+def group_results(surf, scores, team, titles):
+    """Fin de partie en groupe : résultat d'équipe d'abord, titres fun, puis les joueurs en petit."""
+    W, H = surf.get_size()
+    dim = pygame.Surface((W, H), pygame.SRCALPHA)
+    dim.fill((0, 0, 0, 200))
+    surf.blit(dim, (0, 0))
+    text(surf, "BRAVO L'ÉQUIPE !", 52, (255, 255, 255), (W // 2, px(40)), "midtop")
+    text(surf, f"{team.total:,}".replace(",", " "), 60, (255, 215, 64), (W // 2, px(110)), "midtop")
+    for k in range(5):
+        star(surf, W // 2 + (k - 2) * px(56), px(205), px(24), (255, 215, 64) if team.stars > k else (90, 90, 110))
+    text(surf, f"{team.hits} combo(s) d'équipe · meilleur x{team.best_combo}", 22, (220, 220, 235),
+         (W // 2, px(240)), "midtop", bold=False)
+    y = px(285)
+    for title, p in titles:
+        r = text(surf, f"{title} : ", 24, (230, 230, 240), (W // 2, y), "topright", bold=False)
+        tag(surf, f"P{p + 1}", 26, pcolor(p), (r.right, r.centery), "midleft")
+        y += px(38)
+    n = len(scores)
+    cols = min(4, max(1, n))
+    cw = min(px(260), (W - px(60)) // cols)
+    x0 = (W - cols * cw) // 2
+    y0 = max(y + px(16), px(420))
+    for i, sc in enumerate(scores):
+        cx, cy = x0 + (i % cols) * cw + cw // 2, y0 + (i // cols) * px(80)
+        text(surf, f"P{i + 1}", 26, pcolor(i), (cx - px(10), cy), "topright")
+        text(surf, f"{sc.total:,}".replace(",", " "), 26, (255, 255, 255), (cx, cy), "topleft")
+        for k in range(5):
+            star(surf, cx - px(48) + k * px(24), cy + px(48), px(9), (255, 215, 64) if sc.stars > k else (90, 90, 110))
+    text(surf, "Entrée : retour", 20, (200, 200, 210), (W // 2, H - px(30)), "midbottom", bold=False)

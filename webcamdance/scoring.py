@@ -173,3 +173,99 @@ def assign_coaches(n_players, coach_x, presence, offset=0):
     else:
         ranks = np.arange(n) * nc // n
     return order[(ranks + offset) % nc].tolist()
+
+
+def solo_coach(player_x, coach_x, presence, current=None, margin=0.1, hyst=0.03):
+    """Joueur seul : coach dont la place (gauche/centre/droite) correspond à celle du joueur
+    dans l'image miroir. Seuls les coachs presque aussi présents que le principal sont éligibles
+    (un coach qui n'apparaît qu'une partie de la chanson n'est pas proposé). L'image est découpée
+    en zones égales, une par coach éligible ; `hyst` évite le clignotement à la frontière.
+    player_x normalisé [0,1] ; -> indice de coach."""
+    presence = np.asarray(presence, float)
+    ok = np.flatnonzero(presence >= presence.max() - margin)
+    order = ok[np.argsort(np.asarray(coach_x)[ok])]
+    k = len(order)
+    if current in order:
+        z = int(np.flatnonzero(order == current)[0])
+        if z / k - hyst <= player_x <= (z + 1) / k + hyst:
+            return int(current)
+    return int(order[min(k - 1, max(0, int(player_x * k)))])
+
+
+def group_coaches(player_x, coach_x, presence, offset=0, margin=0.1):
+    """Groupe (plusieurs rangées) : coach selon la place gauche->droite du joueur dans le groupe.
+    L'étendue du groupe est découpée en zones égales, une par coach éligible (presque aussi présent
+    que le principal) : deux joueurs l'un derrière l'autre suivent le même coach.
+    offset décale circulairement. player_x en pixels ; -> liste d'indices de coach."""
+    presence = np.asarray(presence, float)
+    ok = np.flatnonzero(presence >= presence.max() - margin)
+    order = ok[np.argsort(np.asarray(coach_x)[ok])]
+    k = len(order)
+    x = np.asarray(player_x, float)
+    if len(x) == 0:
+        return []
+    span = x.max() - x.min()
+    z = np.zeros(len(x), int) if span <= 0 else np.minimum(((x - x.min()) / span * k).astype(int), k - 1)
+    if span <= 0 and k > 1:
+        z[:] = k // 2
+    return [int(order[(zi + offset) % k]) for zi in z]
+
+
+class TeamScore:
+    """Score collaboratif : jauge = moyenne des joueurs, combo d'équipe quand assez de joueurs
+    jugés sur un même move font PERFECT/SUPER. Un joueur non jugé (caché) ne compte pas."""
+
+    GOOD = ("PERFECT", "SUPER")
+
+    def __init__(self, scores, frac=0.7, period=0.75, grace=0.25):
+        self.scores, self.frac, self.period, self.grace = scores, frac, period, grace
+        self._read = [0] * len(scores)      # entrées d'historique déjà lues, par joueur
+        self._moves = {}                    # move -> labels des joueurs jugés
+        self.done = 0                       # prochain move à évaluer
+        self.combo = self.best_combo = self.hits = 0
+        self.last = None                    # (combo, t_chanson) du dernier combo d'équipe
+
+    def update(self):
+        for p, sc in enumerate(self.scores):
+            for h in sc.history[self._read[p]:]:
+                if h["label"] != "SKIP":
+                    self._moves.setdefault(h["move"], []).append(h["label"])
+            self._read[p] = len(sc.history)
+        upto = min((sc.w for sc in self.scores), default=0)
+        while self.done < upto:
+            labels = self._moves.pop(self.done, [])
+            if len(labels) >= min(2, len(self.scores)):     # trop peu de joueurs jugés : neutre
+                if sum(lb in self.GOOD for lb in labels) >= self.frac * len(labels):
+                    self.combo += 1
+                    self.hits += 1
+                    self.best_combo = max(self.best_combo, self.combo)
+                    self.last = (self.combo, (self.done + 1) * self.period + self.grace)
+                else:
+                    self.combo = 0
+            self.done += 1
+
+    @property
+    def total(self):
+        return sum(sc.total for sc in self.scores)
+
+    @property
+    def ratio(self):
+        return float(np.mean([sc.ratio for sc in self.scores])) if self.scores else 0.0
+
+    @property
+    def stars(self):
+        return min(5, int(self.ratio / 0.16))
+
+
+def fun_titles(scores):
+    """Titres pour l'écran de fin (groupe) : -> liste de (titre, joueur)."""
+    if len(scores) < 2:
+        return []
+    out = []
+    best = lambda key: max(range(len(scores)), key=key)
+    out.append(("Le plus synchro", best(lambda p: scores[p].ratio)))
+    out.append(("Roi du combo", best(lambda p: scores[p].best_combo)))
+    p = best(lambda p: scores[p].counts.get("PERFECT", 0))
+    if scores[p].counts.get("PERFECT", 0):
+        out.append(("Machine à PERFECT", p))
+    return out

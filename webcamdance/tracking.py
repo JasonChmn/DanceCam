@@ -14,6 +14,21 @@ def select_people(boxes, k, min_rel_h=0.45):
     return idx[h[idx] >= min_rel_h * h[idx[0]]][:k]
 
 
+def arms_up(kp, thr):
+    """Au moins un poignet au-dessus de la tête (visage, sinon épaules - 0,6 x largeur d'épaules)."""
+    ok = kp[:, 2] >= thr
+    wr = [kp[i, 1] for i in (9, 10) if ok[i]]
+    if not wr:
+        return False
+    if ok[:5].any():
+        head = kp[:5][ok[:5], 1].min()
+    elif ok[5] and ok[6]:
+        head = kp[5:7, 1].mean() - 0.6 * abs(kp[5, 0] - kp[6, 0])
+    else:
+        return False
+    return min(wr) < head
+
+
 def centers_scales(kpts, boxes, thr):
     """Centre = milieu des hanches si visibles (stable bras levés), sinon centre bbox."""
     c = np.stack([(boxes[:, 0] + boxes[:, 2]) / 2, (boxes[:, 1] + boxes[:, 3]) / 2], 1)
@@ -159,6 +174,14 @@ class PlayerTracker:
         self.proto = np.array(sigs, np.float32)
         self.seen = np.full(self.n, t, np.float64)
         self.ready = True
+
+    def subset(self, keep):
+        """Ne garde que les slots `keep` (dans cet ordre) : joueurs retenus après la photo."""
+        keep = list(keep)
+        self.n = len(keep)
+        self.kf = [self.kf[i] for i in keep]
+        self.scale, self.anchor = self.scale[keep], self.anchor[keep]
+        self.proto, self.seen = self.proto[keep], self.seen[keep]
 
     def _proto_update(self, i, sig):
         if np.isnan(self.proto[i]).any():

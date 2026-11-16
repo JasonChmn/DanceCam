@@ -51,49 +51,102 @@ class Camera(threading.Thread):
 
 
 class PlayerWorker(threading.Thread):
-    """Inférence sur la dernière frame caméra, affectation aux slots, lissage, publication."""
+    """Inférence sur la dernière frame caméra, affectation aux slots, lissage, publication.
 
-    def __init__(self, cam, pose, cfg, n_players):
+    Mode groupe (group=True) : nombre de joueurs inconnu au départ. Le worker publie toutes les
+    personnes vues (`raw`) jusqu'à lock_people() (photo bras levés), puis suit ces personnes ;
+    keep() réduit ensuite aux joueurs retenus."""
+
+    FREE_MAX = 12      # personnes publiées en mode libre (photo de groupe)
+
+    def __init__(self, cam, pose, cfg, n_players, group=False):
         super().__init__(daemon=True)
-        self.cam, self.pose, self.cfg, self.n = cam, pose, cfg, n_players
-        pose(np.zeros((cam.h, cam.w, 3), np.uint8))  # warmup à la résolution caméra (sinon ~1 s sur la 1re frame)
-        self.tracker = PlayerTracker(n_players, cam.w)
+        self.cam, self.pose, self.cfg, self.n, self.group = cam, pose, cfg, n_players, group
+        self.imgsz = cfg.group_imgsz if group else None
+        self._infer(np.zeros((cam.h, cam.w, 3), np.uint8))  # warmup à la résolution caméra (sinon ~1 s sur la 1re frame)
+        self.tracker = None if group else PlayerTracker(n_players, cam.w)
         self.filters = [OneEuro() for _ in range(n_players)]
         self.q = queue.SimpleQueue()           # (t_capture, [kp(17,3) | None] * n)
         self.view = (None, [None] * n_players)  # pour l'affichage
+        self.raw = None         # mode libre : (frame, t, kpts, boxes, sigs, centers, scales), personnes triées par x
         self.n_visible = 0
         self.infer_ms = 0.0
         self._lock_req = False
+        self._cmds = []         # commandes du mode groupe, exécutées dans le thread
         self._halt = False
+
+    def _infer(self, frame):
+        return self.pose(frame, self.imgsz) if self.imgsz else self.pose(frame)
 
     def lock(self):
         """Fige les slots (gauche->droite) et mémorise la couleur de chaque joueur à la prochaine
         frame où n joueurs sont visibles et mesurables."""
         self._lock_req = True
 
+    def lock_people(self, raw, idx):
+        """Groupe : suit les personnes idx (triées par x) de la photo `raw`."""
+        self._cmds.append(("lock", raw, list(idx)))
+
+    def keep(self, slots):
+        """Groupe : ne garde que ces slots (ordre = P1, P2…)."""
+        self._cmds.append(("keep", list(slots)))
+
+    def unlock(self):
+        """Groupe : retour au mode libre (refaire le comptage)."""
+        self._cmds.append(("unlock",))
+
     @property
     def locked(self):
-        return self.tracker.ready
+        return self.tracker is not None and self.tracker.ready
 
     def stop(self):
         self._halt = True
 
+    def _run_cmds(self):
+        while self._cmds:
+            c = self._cmds.pop(0)
+            if c[0] == "lock":
+                _, (_, t, _, _, sigs, centers, scales), idx = c
+                self.n = len(idx)
+                self.tracker = PlayerTracker(max(1, self.n), self.cam.w)
+                self.tracker.init(centers[idx], scales[idx], sigs[idx], t)
+            elif c[0] == "keep" and self.tracker is not None:
+                self.tracker.subset(c[1])
+                self.n = len(c[1])
+            elif c[0] == "unlock":
+                self.tracker, self.n = None, 0
+            self.filters = [OneEuro() for _ in range(self.n)]
+            self.view = (self.view[0], [None] * self.n)
+
     def run(self):
-        last, thr, n = -1, self.cfg.kpt_conf, self.n
+        last, thr = -1, self.cfg.kpt_conf
         while not self._halt:
+            if self._cmds:
+                self._run_cmds()
             fid, frame, t = self.cam.latest()
             if fid == last:
                 time.sleep(0.001)
                 continue
             last = fid
+            n = self.n
             t0 = time.perf_counter()
-            kpts, boxes, _ = self.pose(frame)[0]
+            kpts, boxes, _ = self._infer(frame)[0]
             self.infer_ms += 0.1 * ((time.perf_counter() - t0) * 1e3 - self.infer_ms)
-            idx = select_people(boxes, n + 1)
+            if self.group:
+                # rangées : les joueurs du fond paraissent petits (jambes cachées) -> seuil de taille bas
+                idx = select_people(boxes, self.FREE_MAX if self.tracker is None else n + 4, min_rel_h=0.2)
+            else:
+                idx = select_people(boxes, n + 1)
             kpts, boxes = kpts[idx], boxes[idx]
             centers, scales = centers_scales(kpts, boxes, thr)
             sigs = signatures(frame, kpts, thr)          # couleur de tenue (~1 ms)
-            self.n_visible = min(len(idx), n)
+            self.n_visible = min(len(idx), n) if n else len(idx)
+
+            if self.group and self.tracker is None:     # mode libre : tout le monde, gauche->droite
+                o = np.argsort(centers[:, 0]) if len(idx) else np.zeros(0, int)
+                self.raw = (frame, t, kpts[o], boxes[o], sigs[o], centers[o], scales[o])
+                self.view = (frame, list(kpts[o]))
+                continue
 
             if not self.tracker.ready:  # calibration : ordre provisoire gauche->droite
                 top = np.arange(min(n, len(idx)))

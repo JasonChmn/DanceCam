@@ -1,6 +1,6 @@
 # WebcamDance
 
-Jeu de danse à la webcam, de 1 à 4 joueurs, sans manette ni capteur : on danse face à l'écran en imitant
+Jeu de danse à la webcam, de 1 à 4 joueurs (ou en groupe jusqu'à 8), sans manette ni capteur : on danse face à l'écran en imitant
 le ou les danseurs d'une vidéo, et le jeu note chaque mouvement.
 
 N'importe quelle vidéo de chorégraphie peut devenir une chanson jouable : dance practice K-pop, clip,
@@ -47,14 +47,14 @@ la machine qui joue (lié au GPU), après `pip install tensorrt`.
 
 ## Plus de détails
 
-Jeu de danse webcam, 1–4 joueurs. Cible : Windows + RTX 3060 6 Go (développé et testé sous Linux).
+Jeu de danse webcam, 1–4 joueurs, mode groupe 5-8. Cible : Windows + RTX 3060 6 Go (développé et testé sous Linux).
 ffmpeg est fourni par `imageio-ffmpeg` (rien à installer). Torch : `cu124` suffit hors GPU RTX 50xx.
 
 ### Jouer
 ```
 python -m webcamdance --fullscreen         # ou F11 en jeu ; --window 1920x1080, --fps 60
 ```
-Menu : ↑/↓ choisir · Entrée jouer · 1-4 joueurs · A ajouter (coller un ou plusieurs liens / une
+Menu : ↑/↓ choisir · Entrée jouer · 1-4 joueurs, 5 groupe · A ajouter (coller un ou plusieurs liens / une
 playlist, Ctrl+V) · Suppr supprimer · Échap quitter.
 En jeu : Espace pause · S squelettes coach · ←/→ changer de coach (calibration) · Échap retour.
 

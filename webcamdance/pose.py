@@ -29,11 +29,12 @@ class PoseEstimator:
             self.prec = {"half": self.half}
         self(np.zeros((480, 640, 3), np.uint8))  # warmup
 
-    def __call__(self, frames):
-        """frame BGR ou liste -> liste de (kpts (M,17,3), boxes xyxy (M,4), conf (M,))."""
+    def __call__(self, frames, imgsz=None):
+        """frame BGR ou liste -> liste de (kpts (M,17,3), boxes xyxy (M,4), conf (M,)).
+        imgsz : taille d'entrée du réseau (défaut cfg.imgsz) ; tout multiple de 32 convient."""
         if isinstance(frames, np.ndarray):
             frames = [frames]
-        res = self.model.predict(frames, imgsz=self.cfg.imgsz, conf=self.cfg.det_conf,
+        res = self.model.predict(frames, imgsz=imgsz or self.cfg.imgsz, conf=self.cfg.det_conf,
                                  device=self.device, verbose=False, **self.prec)
         out = []
         for r in res:

@@ -3,7 +3,7 @@
 
     python -m webcamdance [--songs-dir songs] [--fullscreen] [--window 1920x1080]
 
-Touches : ↑/↓ choisir · Entrée jouer · 1-4 joueurs · A ajouter · Suppr supprimer ·
+Touches : ↑/↓ choisir · Entrée jouer · 1-4 joueurs, 5 groupe · C caméra · R réglages · A ajouter · Suppr supprimer ·
 Ctrl+F rechercher · F11 plein écran · Échap quitter.
 """
 import argparse
@@ -20,7 +20,7 @@ import cv2
 import numpy as np
 import pygame
 
-from . import hud, library
+from . import cameras, hud, library
 from .play import Display, Session, config_from_args, run_game
 from .songinfo import display_name
 
@@ -153,14 +153,39 @@ def fmt_dur(s):
     return f"{int(s) // 60}:{int(s) % 60:02d}"
 
 
+# réglages du menu « R » : (clé settings.json, libellé, valeurs possibles, aide)
+OPTIONS = [("vsync", "Synchro écran (vsync)", [True, False], "images régulières, sans saccade"),
+           ("fps", "Images par seconde", [60, 30], "60 : défilement plus doux (un peu plus de CPU)"),
+           ("pictos", "Pictos des mouvements à venir", [True, False], "aussi la touche P en jeu")]
+DEFAULTS = {"vsync": True, "fps": 60, "pictos": True}
+
+
+def apply_settings(cfg, settings, keep_fps=False):
+    """Réglages persistants -> configuration de jeu."""
+    cfg.vsync = bool(settings.get("vsync", DEFAULTS["vsync"]))
+    cfg.show_pictos = bool(settings.get("pictos", DEFAULTS["pictos"]))
+    if not keep_fps:
+        cfg.render_fps = int(settings.get("fps", DEFAULTS["fps"]))
+
+
+def fmt_opt(v):
+    return ("Oui" if v else "Non") if isinstance(v, bool) else str(v)
+
+
+KP_KEYS = [pygame.K_KP1, pygame.K_KP2, pygame.K_KP3, pygame.K_KP4, pygame.K_KP5]
+
+
 class Menu:
     ROW = 116
 
-    def __init__(self, disp, sess, songs_dir):
+    def __init__(self, disp, sess, songs_dir, settings, cams):
         self.disp, self.sess, self.songs_dir = disp, sess, Path(songs_dir)
+        self.settings, self.cams = settings, cams
+        self._preview = (None, None)    # (fid, surface) de l'aperçu webcam
         self.importer = Importer(songs_dir)
         self.players, self.sel, self.scroll = 1, 0, 0
-        self.mode = "list"          # list | add | delete
+        self.mode = "list"          # list | add | delete | settings
+        self.opt_sel = 0
         self.text = ""
         self.query, self.searching = "", False
         self.flash, self.flash_t = "", 0.0
@@ -216,12 +241,34 @@ class Menu:
         if not self.songs:
             return
         song = self.songs[self.sel]
-        outcome, _, _ = run_game(self.disp, self.sess, song["path"], self.players)
+        try:
+            outcome, _, _ = run_game(self.disp, self.sess, song["path"], self.players)
+        except RuntimeError as err:
+            if self.sess.cam is not None:
+                raise
+            print(f"[menu] {err}")
+            self.say("Caméra indisponible : choisis-en une autre (C)")
+            return
         pygame.display.set_caption("WebcamDance")
         pygame.key.set_repeat(300, 40)
         self.refresh()
         if outcome == "quit":
             pygame.event.post(pygame.event.Event(pygame.QUIT))
+
+    def cam_name(self):
+        i = self.sess.cfg.cam_index
+        return next((n for k, n in self.cams if k == i), f"Caméra {i + 1}")
+
+    def next_camera(self):
+        """Caméra suivante (liste relue : prise en compte des branchements à chaud)."""
+        self.cams = cameras.list_cameras(busy={self.sess.cfg.cam_index}) or self.cams
+        idx = [i for i, _ in self.cams]
+        cur = self.sess.cfg.cam_index
+        nxt = idx[(idx.index(cur) + 1) % len(idx)] if cur in idx else (idx[0] if idx else cur)
+        self._preview = (None, None)
+        self.sess.set_camera(nxt)
+        self.sess.cfg.cam_index = nxt
+        self.settings.set(camera=self.cam_name())
 
     def set_query(self, q):
         self.query = q
@@ -236,6 +283,8 @@ class Menu:
     def handle(self, e):
         if self.mode == "add":
             return self._handle_add(e)
+        if self.mode == "settings":
+            return self._handle_settings(e)
         if self.searching and self._handle_search(e):
             return None
         if self.mode == "delete":
@@ -261,10 +310,14 @@ class Menu:
                 self.sel = (self.sel + (1 if k == pygame.K_DOWN else -1)) % len(self.songs)
             elif k in (pygame.K_RETURN, pygame.K_KP_ENTER):
                 self.play()
-            elif pygame.K_1 <= k <= pygame.K_4:
+            elif pygame.K_1 <= k <= pygame.K_5:          # 5 = mode groupe « 5+ »
                 self.players = k - pygame.K_0
-            elif k in (pygame.K_KP1, pygame.K_KP2, pygame.K_KP3, pygame.K_KP4):
-                self.players = [pygame.K_KP1, pygame.K_KP2, pygame.K_KP3, pygame.K_KP4].index(k) + 1
+            elif k in KP_KEYS:
+                self.players = KP_KEYS.index(k) + 1
+            elif k == pygame.K_c:
+                self.next_camera()
+            elif k == pygame.K_r:
+                self.mode, self.opt_sel = "settings", 0
             elif k == pygame.K_a:
                 self.mode, self.text = "add", ""
                 pygame.key.start_text_input()
@@ -283,6 +336,9 @@ class Menu:
                 if r.collidepoint(e.pos):
                     self.players = i
                     return None
+            if self._cam_rect().collidepoint(e.pos):
+                self.next_camera()
+                return None
             if self._add_rect().collidepoint(e.pos):
                 self.mode, self.text = "add", ""
                 pygame.key.start_text_input()
@@ -294,6 +350,76 @@ class Menu:
                     self.sel = i
                     self._last_click = (i, time.perf_counter())
         return None
+
+    def set_option(self, key, value):
+        self.settings.set(**{key: value})
+        cfg = self.sess.cfg
+        apply_settings(cfg, self.settings)
+        if key == "vsync":
+            self.disp.reopen(vsync=cfg.vsync)
+            self._thumbs.clear()
+
+    def _cycle_option(self, i, step=1):
+        key, _, values, _ = OPTIONS[i]
+        cur = self.settings.get(key, DEFAULTS[key])
+        nxt = values[(values.index(cur) + step) % len(values)] if cur in values else values[0]
+        self.set_option(key, nxt)
+
+    def _handle_settings(self, e):
+        if e.type == pygame.KEYDOWN:
+            k = e.key
+            if k in (pygame.K_ESCAPE, pygame.K_r):
+                self.mode = "list"
+            elif k in (pygame.K_UP, pygame.K_DOWN):
+                self.opt_sel = (self.opt_sel + (1 if k == pygame.K_DOWN else -1)) % len(OPTIONS)
+            elif k in (pygame.K_RETURN, pygame.K_KP_ENTER, pygame.K_SPACE, pygame.K_RIGHT):
+                self._cycle_option(self.opt_sel)
+            elif k == pygame.K_LEFT:
+                self._cycle_option(self.opt_sel, -1)
+        elif e.type == pygame.MOUSEBUTTONDOWN and e.button == 1:
+            for i, r in enumerate(self._option_rects()):
+                if r.collidepoint(e.pos):
+                    self.opt_sel = i
+                    self._cycle_option(i)
+                    return None
+            if not self._settings_box().collidepoint(e.pos):
+                self.mode = "list"
+        return None
+
+    def _settings_box(self):
+        px = hud.px
+        W, H = self.disp.screen.get_size()
+        box = pygame.Rect(0, 0, min(W - px(60), px(760)), px(110 + 66 * len(OPTIONS)))
+        box.center = (W // 2, H // 2)
+        return box
+
+    def _option_rects(self):
+        px, box = hud.px, self._settings_box()
+        return [pygame.Rect(box.x + px(24), box.y + px(70) + i * px(66), box.w - px(48), px(58))
+                for i in range(len(OPTIONS))]
+
+    def _draw_settings(self):
+        s, px = self.disp.screen, hud.px
+        W, H = s.get_size()
+        dim = pygame.Surface((W, H), pygame.SRCALPHA)
+        dim.fill((0, 0, 0, 170))
+        s.blit(dim, (0, 0))
+        box = self._settings_box()
+        pygame.draw.rect(s, PANEL, box, border_radius=px(14))
+        pygame.draw.rect(s, ACCENT, box, px(2), border_radius=px(14))
+        hud.text(s, "Réglages", 26, (255, 255, 255), (box.centerx, box.y + px(20)), "midtop")
+        for i, ((key, label, _, help_), r) in enumerate(zip(OPTIONS, self._option_rects())):
+            on = i == self.opt_sel
+            pygame.draw.rect(s, (40, 40, 70) if on else (32, 32, 54), r, border_radius=px(10))
+            if on:
+                pygame.draw.rect(s, ACCENT, r, px(2), border_radius=px(10))
+            hud.text(s, label, 22, (255, 255, 255), (r.x + px(16), r.y + px(6)), shadow=False)
+            hud.text(s, help_, 15, (160, 160, 180), (r.x + px(16), r.y + px(34)), bold=False, shadow=False)
+            v = self.settings.get(key, DEFAULTS[key])
+            hud.text(s, fmt_opt(v), 22, ACCENT if v is True or v == 60 else (220, 220, 230),
+                     (r.right - px(16), r.centery), "midright", shadow=False)
+        hud.text(s, "↑/↓ choisir · Entrée changer · Échap fermer", 15, (150, 150, 170),
+                 (box.centerx, box.bottom - px(14)), "midbottom", bold=False, shadow=False)
 
     def _handle_search(self, e):
         """Saisie dans la barre de recherche. Renvoie True si l'événement est consommé ; sinon
@@ -317,7 +443,7 @@ class Menu:
                 return False                            # Entrée lance la chanson sélectionnée
             elif e.key in (pygame.K_UP, pygame.K_DOWN):
                 return False
-            return True                                 # les autres raccourcis (A, 1-4, Suppr…) sont muets
+            return True                                 # les autres raccourcis (A, 1-5, Suppr…) sont muets
         if e.type == pygame.MOUSEBUTTONDOWN and e.button == 1:
             if not self._search_rect().collidepoint(e.pos):
                 self.focus_search(False)
@@ -350,7 +476,35 @@ class Menu:
     def _chip_rects(self):
         px = hud.px
         W = self.disp.screen.get_width()
-        return [(i, pygame.Rect(W - px(30) - (5 - i) * px(56), px(26), px(48), px(44))) for i in range(1, 5)]
+        return [(i, pygame.Rect(W - px(30) - (6 - i) * px(56), px(26), px(48), px(44))) for i in range(1, 6)]
+
+    def _cam_rect(self):
+        """Aperçu webcam 16:9, à gauche du libellé « Joueurs »."""
+        px = hud.px
+        h = px(56)
+        r = pygame.Rect(0, 0, h * 16 // 9, h)
+        r.topright = (self._chip_rects()[0][1].x - px(120), px(20))
+        return r
+
+    def _draw_camera(self):
+        s, px = self.disp.screen, hud.px
+        r = self._cam_rect()
+        cam = self.sess.cam
+        pygame.draw.rect(s, PANEL, r, border_radius=px(8))
+        if cam is not None:
+            fid, frame, _ = cam.latest()
+            if self._preview[0] != fid or self._preview[1].get_size() != r.size:
+                small = cv2.resize(frame, r.size, interpolation=cv2.INTER_AREA)
+                self._preview = (fid, hud.bgr_surface(small))
+            s.blit(self._preview[1], r)
+        else:
+            msg = "…" if not self.sess.cam_ready else "Aucune image"
+            hud.text(s, msg, 16, (170, 170, 190), r.center, "center", bold=False, shadow=False)
+        pygame.draw.rect(s, ACCENT if cam is not None else (200, 80, 80), r, px(2), border_radius=px(8))
+        hud.text(s, self.cam_name()[:28], 20, (220, 220, 230), (r.x - px(12), r.centery - px(11)), "midright",
+                 bold=False)
+        hint = "C : changer" if len(self.cams) > 1 else "Caméra"
+        hud.text(s, hint, 15, (150, 150, 170), (r.x - px(12), r.centery + px(13)), "midright", bold=False)
 
     def _add_rect(self):
         px = hud.px
@@ -390,7 +544,9 @@ class Menu:
         for i, r in self._chip_rects():
             on = i == self.players
             pygame.draw.rect(s, hud.COLORS[i - 1] if on else PANEL, r, border_radius=px(10))
-            hud.text(s, str(i), 26, (10, 10, 20) if on else (220, 220, 230), r.center, "center", shadow=False)
+            hud.text(s, "5+" if i == 5 else str(i), 26, (10, 10, 20) if on else (220, 220, 230), r.center, "center",
+                     shadow=False)
+        self._draw_camera()
         self._draw_search()
         if not self.all_songs:
             hud.text(s, "Aucune chanson : appuie sur A pour en ajouter (lien YouTube, liste ou playlist)",
@@ -436,13 +592,15 @@ class Menu:
         pygame.draw.rect(s, (30, 70, 90), ar, border_radius=px(10))
         pygame.draw.rect(s, ACCENT, ar, px(2), border_radius=px(10))
         hud.text(s, "+ Ajouter des chansons (A)", 22, (255, 255, 255), ar.center, "center")
-        hud.text(s, "Entrée jouer · ↑/↓ choisir · 1-4 joueurs · Suppr supprimer · Ctrl+F rechercher · "
+        hud.text(s, "Entrée jouer · ↑/↓ choisir · 1-4 joueurs, 5 groupe · C caméra · R réglages · Suppr supprimer · Ctrl+F rechercher · "
                  "F11 plein écran · Échap quitter",
                  16, (150, 150, 170), (W - px(30), H - px(41)), "midright", bold=False)
         if self.flash and time.perf_counter() - self.flash_t < 3:
             hud.tag(s, self.flash, 22, (255, 255, 255), (W // 2, px(28)), "midtop")
         if self.mode == "add":
             self._draw_add()
+        elif self.mode == "settings":
+            self._draw_settings()
         elif self.mode == "delete":
             self._modal(["Supprimer « " + display_name(self.songs[self.sel]["meta"])[:50]
                          + " » ?",
@@ -501,23 +659,28 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--songs-dir", default="songs")
     ap.add_argument("--players", type=int, default=1)
-    ap.add_argument("--camera", type=int, default=0)
+    ap.add_argument("--camera", type=int, help="index OpenCV (sinon : caméra choisie dans le menu)")
     ap.add_argument("--model")
     ap.add_argument("--latency-ms", type=float)
     ap.add_argument("--fullscreen", action="store_true")
     ap.add_argument("--window", default="1280x720")
     ap.add_argument("--fps", type=int)
     a = ap.parse_args()
+    settings = cameras.Settings(Path(a.songs_dir).resolve().parent / "settings.json")
+    cams = cameras.list_cameras()
+    if a.camera is None:
+        a.camera = cameras.pick(cams, settings)
     cfg = config_from_args(a)
+    apply_settings(cfg, settings, keep_fps=a.fps is not None)
     Path(a.songs_dir).mkdir(exist_ok=True)
     clean_incomplete(a.songs_dir)
     pygame.mixer.pre_init(44100, -16, 2, 1024)
     pygame.init()
     pygame.key.set_repeat(300, 40)
-    disp = Display(a.fullscreen, tuple(int(v) for v in a.window.lower().split("x")))
+    disp = Display(a.fullscreen, tuple(int(v) for v in a.window.lower().split("x")), vsync=cfg.vsync)
     sess = Session(cfg)
-    menu = Menu(disp, sess, a.songs_dir)
-    menu.players = max(1, min(4, a.players))
+    menu = Menu(disp, sess, a.songs_dir, settings, cams)
+    menu.players = max(1, min(5, a.players))
     try:
         menu.run()
     finally:

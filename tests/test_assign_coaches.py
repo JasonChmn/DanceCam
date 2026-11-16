@@ -27,3 +27,13 @@ def test_fewer_players_spread():
 def test_more_players_shared():
     assert assign_coaches(4, [0.3, 0.7], [1, 1]) == [0, 0, 1, 1]
     assert assign_coaches(3, [0.7], [1]) == [0, 0, 0]
+
+
+def test_solo_coach_suit_la_position():
+    from webcamdance.scoring import solo_coach
+    x, pres = [0.22, 0.48, 0.74], [0.971, 0.976, 0.977]
+    assert solo_coach(0.1, x, pres) == 0
+    assert solo_coach(0.5, x, pres) == 1
+    assert solo_coach(0.9, x, pres) == 2
+    assert solo_coach(0.35, x, pres, current=1) == 1                # hystérésis à la frontière
+    assert solo_coach(0.1, x, [0.2, 0.95, 0.9]) == 1               # coach peu présent écarté

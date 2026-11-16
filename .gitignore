@@ -9,3 +9,4 @@ songs/
 *.bak
 liste_chansons_link.avant_nettoyage.txt
 liens_retires.txt
+settings.json

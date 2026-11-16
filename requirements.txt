@@ -7,3 +7,4 @@ pygame-ce
 yt-dlp[default]   # inclut le solveur JS (yt-dlp-ejs)
 deno             # moteur JS exigé par YouTube via yt-dlp (binaire fourni par pip, Windows inclus)
 imageio-ffmpeg
+pygrabber; sys_platform == "win32"   # noms des webcams (sélecteur du menu)

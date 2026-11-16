@@ -16,7 +16,9 @@ class Config:
     min_coach_presence: float = 0.70        # présence moyenne des coachs sous laquelle l'import est rejeté
     band_margin: float = 0.05               # marge gardée autour du bandeau coach à l'encodage final
     video_fps: int = 30
-    render_fps: int = 30                    # vidéo et webcam sont à 30 : plus haut = HUD plus fluide
+    render_fps: int = 60                    # images/s max de l'affichage (vidéo à 30 : chaque image montrée 2 fois)
+    vsync: bool = True                      # synchro écran : images régulières, sans saccade ni déchirure
+    show_pictos: bool = True                # bandeau des mouvements à venir (touche P en jeu)
     game_threads: int = 4                   # threads CPU en jeu (OpenCV, PyTorch) : 4 suffisent pour 30 i/s
     # --- caméra ---
     cam_index: int = 0
@@ -26,9 +28,14 @@ class Config:
     cam_latency: float = 0.08               # s, capture->horodatage (à calibrer)
     # --- tracking joueurs ---
     lane_weight: float = 1.5                # poids du prior couloir (joueurs)
+    # --- mode groupe (5+ joueurs, plusieurs rangées) ---
+    group_max: int = 8                      # joueurs max (une couleur chacun)
+    group_imgsz: int = 960                  # entrée YOLO plus grande : joueurs du fond petits / à moitié cachés
+    group_min_cover: float = 0.25           # on note ce qui est visible, même si seuls les bras dépassent
+    group_combo_frac: float = 0.7           # part des joueurs jugés en PERFECT/SUPER pour un combo d'équipe
     # --- scoring ---
     theta_max_deg: float = 60.0             # erreur angulaire donnant 0
-    win_back: float = 0.30                  # tolérance joueur en retard (s)
+    win_back: float = 0.60                  # tolérance joueur en retard (s) ; mesuré : ~0,45 s réel (latence + réaction)
     win_fwd: float = 0.15                   # tolérance joueur en avance (s)
     static_weight: float = 0.3              # poids relatif d'un os immobile chez le coach
     omega0: float = 2.0                     # rad/s, normalisation du poids de mouvement
@@ -41,5 +48,7 @@ class Config:
     # (seuil, label, points). Calé sur le bot (2026-11) : imitation parfaite p10 0.80 / médiane 0.88,
     # danse fausse ou immobile médiane ~0.43 / p90 ~0.55. -> parfait ~94 % PERFECT, faux ~74 % MISS.
     # À affiner avec de vraies parties (un humain imite moins fidèlement que le bot).
-    judgements: tuple = ((0.78, "PERFECT", 100), (0.68, "SUPER", 75),
-                         (0.58, "GOOD", 50), (0.48, "OK", 25), (0.0, "MISS", 0))
+    # 2026-11-13 : seuils baissés de 0,03 après une vraie partie (humain : PERFECT 19 % -> 40 %,
+    # danse fausse toujours ~35 % MISS / 0 % PERFECT).
+    judgements: tuple = ((0.75, "PERFECT", 100), (0.65, "SUPER", 75),
+                         (0.55, "GOOD", 50), (0.45, "OK", 25), (0.0, "MISS", 0))
