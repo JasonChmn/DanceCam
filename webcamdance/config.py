@@ -43,6 +43,10 @@ class Config:
     player_min_cover: float = 0.5           # part (pondérée) des os visibles du coach que le joueur doit montrer
     judge_min_frames: int = 5               # frames jugeables mini par move, sinon move « non jugé »
     # (os visible chez le coach mais pas chez le joueur : ignoré, pas pénalisé — occlusion, détection ratée)
+    side_fix: bool = True                   # joueur vu de biais/profil : perspective, bras caché, gauche/droite
+    side_gate: float = 0.6                  # épaules joueur / épaules coach (rapportées au tronc) sous lequel on corrige
+    side_hide: float = 0.5                  # sous ce rapport (~60°), le bras le moins sûr est ignoré (deviné)
+    side_stretch: float = 2.0               # élargissement horizontal maximal
     min_cover: float = 0.4                  # fraction d'os coach visibles pour juger
     move_period: float = 0.75               # durée d'un "move" jugé (s)
     grace: float = 0.25                     # attente des poses en retard avant jugement (s)

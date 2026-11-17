@@ -9,6 +9,21 @@ BONES = np.array([(L_SH, L_EL), (L_EL, L_WR), (R_SH, R_EL), (R_EL, R_WR),
 BONE_W = np.array([1.2, 1.5, 1.2, 1.5, 1.0, 1.0, 1.0, 1.0, 0.8], np.float32)
 N_BONES = len(BONE_W)
 
+# permutation gauche <-> droite des 17 keypoints COCO (le modèle confond les côtés de profil)
+SWAP_LR = np.array([0, 2, 1, 4, 3, 6, 5, 8, 7, 10, 9, 12, 11, 14, 13, 16, 15])
+
+
+def shoulder_ratio(kpts, thr):
+    """kpts (...,17,3) -> largeur d'épaules / longueur du tronc (NaN si tronc non visible).
+    ~0,7-0,9 de face, ~0 de profil : mesure de la rotation du corps vue par la caméra."""
+    xy, c = kpts[..., :2], kpts[..., 2]
+    tv = (c[..., [L_SH, R_SH, L_HIP, R_HIP]] >= thr).all(-1)
+    sw = np.linalg.norm(xy[..., L_SH, :] - xy[..., R_SH, :], axis=-1)
+    tl = np.linalg.norm(0.5 * (xy[..., L_SH, :] + xy[..., R_SH, :]) - 0.5 * (xy[..., L_HIP, :] + xy[..., R_HIP, :]),
+                        axis=-1)
+    return np.where(tv & (tl > 1e-3), sw / np.maximum(tl, 1e-3), np.nan)
+
+
 EDGES = [(5, 7), (7, 9), (6, 8), (8, 10), (5, 6), (5, 11), (6, 12), (11, 12),
          (11, 13), (13, 15), (12, 14), (14, 16)]
 

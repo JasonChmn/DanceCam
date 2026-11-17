@@ -2,7 +2,7 @@
 import numpy as np
 from scipy.ndimage import uniform_filter1d
 
-from .skeleton import BONE_W, bone_features
+from .skeleton import BONE_W, L_EL, L_HIP, L_SH, L_WR, R_EL, R_HIP, R_SH, R_WR, SWAP_LR, bone_features, shoulder_ratio
 
 
 def _scan(mask, reverse):
@@ -33,6 +33,7 @@ class CoachTrack:
         omega = uniform_filter1d(omega, size=max(3, int(0.3 * self.fps)), axis=0, mode="nearest")
         self.W = BONE_W * (cfg.static_weight + np.clip(omega / cfg.omega0, 0, 2))  # (T, N, B)
         self.cover = (BONE_W * self.V).sum(-1) / BONE_W.sum()            # (T, N)
+        self.ratio = shoulder_ratio(self.kpts, cfg.kpt_conf)               # (T, N) orientation du coach
         self.theta_max = np.deg2rad(cfg.theta_max_deg)
         self.lags = np.arange(-int(cfg.win_back * self.fps), int(cfg.win_fwd * self.fps) + 1)
         # présence et repères par frame (tag flottant, formation de départ)
@@ -79,18 +80,44 @@ class CoachTrack:
         idx = int(round(t * self.fps)) + self.lags
         inb = (idx >= 0) & (idx < self.T)
         idx = np.clip(idx, 0, self.T - 1)
-        u, v = bone_features(kp_player, cfg.kpt_conf)                    # (B,2), (B,)
         Uc, Vc, W = self.U[idx, c], self.V[idx, c], self.W[idx, c]
-        cos = np.clip((Uc * u).sum(-1), -1.0, 1.0)                       # (K, B)
-        s = np.clip(1.0 - np.arccos(cos) / self.theta_max, 0.0, 1.0)
-        both = Vc & v
-        num = (W * s * both).sum(1)
-        den = (W * both).sum(1)
-        # os masqués chez le joueur (occlusion, détection ratée) : ignorés, mais il faut en
-        # montrer assez (part pondérée des os visibles du coach) pour que la frame compte
-        seen = den / np.maximum((W * Vc).sum(1), 1e-6)
-        ok = inb & (self.cover[idx, c] >= cfg.min_cover) & (seen >= cfg.player_min_cover) & (den > 1e-6)
-        return np.where(ok, num / np.maximum(den, 1e-6), np.nan)
+        ok = inb & (self.cover[idx, c] >= cfg.min_cover)
+        sides = self._side_views(kp_player, idx[len(idx) // 2], c) if cfg.side_fix else None
+        best = None
+        for kp in (kp_player, *(sides or ())):
+            u, v = bone_features(kp, cfg.kpt_conf)                        # (B,2), (B,)
+            cos = np.clip((Uc * u).sum(-1), -1.0, 1.0)                    # (K, B)
+            s = np.clip(1.0 - np.arccos(cos) / self.theta_max, 0.0, 1.0)
+            both = Vc & v
+            num = (W * s * both).sum(1)
+            den = (W * both).sum(1)
+            # os masqués chez le joueur (occlusion, détection ratée) : ignorés, mais il faut en
+            # montrer assez (part pondérée des os visibles du coach) pour que la frame compte
+            seen = den / np.maximum((W * Vc).sum(1), 1e-6)
+            sc = np.where(ok & (seen >= cfg.player_min_cover) & (den > 1e-6), num / np.maximum(den, 1e-6), np.nan)
+            best = sc if best is None else np.fmax(best, sc)
+        return best
+
+    def _side_views(self, kp, i, c):
+        """Joueur vu nettement plus de biais que le coach -> variantes corrigées de sa pose, sinon None.
+
+        - perspective : écarts horizontaux ré-élargis autour du tronc (rapport d'épaules coach/joueur) ;
+        - profil marqué : le bras le moins sûr (caché, deviné par le modèle) est ignoré ;
+        - gauche/droite : le modèle confond les côtés de profil -> pose normale ET pose inversée.
+        La pose brute reste candidate : la meilleure note est gardée, jamais pire qu'avant.
+        """
+        cfg = self.cfg
+        rp, rc = float(shoulder_ratio(kp, cfg.kpt_conf)), float(self.ratio[i, c])
+        if not (np.isfinite(rp) and np.isfinite(rc)) or rp >= cfg.side_gate * rc:
+            return None
+        q = rp / rc
+        kp = kp.copy()
+        cx = kp[[L_SH, R_SH, L_HIP, R_HIP], 0].mean()
+        kp[:, 0] = cx + (kp[:, 0] - cx) * min(1.0 / max(q, 1e-3), cfg.side_stretch)
+        if q < cfg.side_hide:
+            left, right = kp[[L_EL, L_WR], 2].mean(), kp[[R_EL, R_WR], 2].mean()
+            kp[[L_EL, L_WR] if left < right else [R_EL, R_WR], 2] = 0.0
+        return kp, kp[SWAP_LR]
 
 
 class PlayerScore:
