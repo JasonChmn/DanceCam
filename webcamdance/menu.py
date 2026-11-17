@@ -224,20 +224,27 @@ def fmt_dur(s):
 # réglages du menu « R » : (clé settings.json, libellé, valeurs possibles, aide)
 OPTIONS = [("vsync", "Synchro écran (vsync)", [True, False], "images régulières, sans saccade"),
            ("fps", "Images par seconde", [60, 30], "60 : défilement plus doux (un peu plus de CPU)"),
-           ("pictos", "Pictos des mouvements à venir", [True, False], "aussi la touche P en jeu")]
-DEFAULTS = {"vsync": True, "fps": 60, "pictos": True}
+           ("pictos", "Pictos des mouvements à venir", [True, False], "aussi la touche P en jeu"),
+           ("hl_dur", "Durée des highlights", [5, 6, 7, 8, 9, 10], "meilleur et pire passage, en fin de partie")]
+DEFAULTS = {"vsync": True, "fps": 60, "pictos": True, "hl_dur": 5}
 
 
 def apply_settings(cfg, settings, keep_fps=False):
     """Réglages persistants -> configuration de jeu."""
     cfg.vsync = bool(settings.get("vsync", DEFAULTS["vsync"]))
     cfg.show_pictos = bool(settings.get("pictos", DEFAULTS["pictos"]))
+    try:
+        cfg.highlight_seconds = min(10, max(5, int(settings.get("hl_dur", DEFAULTS["hl_dur"]))))
+    except (TypeError, ValueError):     # settings.json modifié à la main
+        cfg.highlight_seconds = DEFAULTS["hl_dur"]
     if not keep_fps:
         cfg.render_fps = int(settings.get("fps", DEFAULTS["fps"]))
 
 
-def fmt_opt(v):
-    return ("Oui" if v else "Non") if isinstance(v, bool) else str(v)
+def fmt_opt(v, key=None):
+    if isinstance(v, bool):
+        return "Oui" if v else "Non"
+    return f"{v} s" if key == "hl_dur" else str(v)
 
 
 KP_KEYS = [pygame.K_KP1, pygame.K_KP2, pygame.K_KP3, pygame.K_KP4, pygame.K_KP5]
@@ -493,7 +500,7 @@ class Menu:
             hud.text(s, label, 22, (255, 255, 255), (r.x + px(16), r.y + px(6)), shadow=False)
             hud.text(s, help_, 15, (160, 160, 180), (r.x + px(16), r.y + px(34)), bold=False, shadow=False)
             v = self.settings.get(key, DEFAULTS[key])
-            hud.text(s, fmt_opt(v), 22, ACCENT if v is True or v == 60 else (220, 220, 230),
+            hud.text(s, fmt_opt(v, key), 22, ACCENT if v is True or v == 60 else (220, 220, 230),
                      (r.right - px(16), r.centery), "midright", shadow=False)
         hud.text(s, "↑/↓ choisir · Entrée changer · Échap fermer", 15, (150, 150, 170),
                  (box.centerx, box.bottom - px(14)), "midbottom", bold=False, shadow=False)

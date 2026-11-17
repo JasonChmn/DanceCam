@@ -165,7 +165,8 @@ def driver(name, meta, size):
         if size:
             at_play(26); pygame.event.post(pygame.event.Event(pygame.VIDEORESIZE, w=size[0] * 5 // 6, h=size[1] * 5 // 6))
             at_play(31); pygame.event.post(pygame.event.Event(pygame.VIDEORESIZE, w=size[0], h=size[1]))
-        at_play(meta["duration"] + 8); key(pygame.K_RETURN)
+        at_play(meta["duration"] + 8); key(pygame.K_RETURN)          # résultats -> highlights
+        time.sleep(4); key(pygame.K_ESCAPE)                          # highlights -> menu
     elif name == "2P_recommence":
         at_play(20); key(pygame.K_ESCAPE)               # menu pause
         time.sleep(1); key(pygame.K_DOWN); key(pygame.K_RETURN)               # Recommencer

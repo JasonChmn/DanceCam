@@ -82,7 +82,8 @@ class CoachTrack:
         idx = np.clip(idx, 0, self.T - 1)
         Uc, Vc, W = self.U[idx, c], self.V[idx, c], self.W[idx, c]
         ok = inb & (self.cover[idx, c] >= cfg.min_cover)
-        sides = self._side_views(kp_player, idx[len(idx) // 2], c) if cfg.side_fix else None
+        i0 = min(max(int(round(t * self.fps)), 0), self.T - 1)            # frame coach sans décalage
+        sides = self._side_views(kp_player, i0, c) if cfg.side_fix else None
         best = None
         for kp in (kp_player, *(sides or ())):
             u, v = bone_features(kp, cfg.kpt_conf)                        # (B,2), (B,)

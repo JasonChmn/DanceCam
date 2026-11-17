@@ -161,7 +161,7 @@ def progress(surf, frac):
     pygame.draw.rect(surf, (255, 255, 255), (0, 0, int(W * frac), px(6)))
 
 
-def results(surf, scores, records=()):
+def results(surf, scores, records=(), hint="Entrée : retour"):
     W, H = surf.get_size()
     dim = pygame.Surface((W, H), pygame.SRCALPHA)
     dim.fill((0, 0, 0, 190))
@@ -182,7 +182,7 @@ def results(surf, scores, records=()):
             text(surf, f"{label}  {cnt}", 22, JUDGE_COL[label], (cx, y), "midtop", bold=False)
             y += px(30)
         text(surf, f"meilleur combo x{sc.best_combo}", 20, (220, 220, 230), (cx, y + px(8)), "midtop", bold=False)
-    text(surf, "Entrée : retour", 20, (200, 200, 210), (W // 2, H - px(40)), "midbottom", bold=False)
+    text(surf, hint, 20, (200, 200, 210), (W // 2, H - px(30)), "midbottom", bold=False)
 
 
 # ---------------------------------------------------------------- disposition empilée
@@ -461,7 +461,7 @@ def group_strip(surf, rect, frame, poses, scores, team, t, thr):
                  "midright", bold=False, shadow=False)
 
 
-def group_results(surf, scores, team, titles):
+def group_results(surf, scores, team, titles, hint="Entrée : retour"):
     """Fin de partie en groupe : résultat d'équipe d'abord, titres fun, puis les joueurs en petit."""
     W, H = surf.get_size()
     dim = pygame.Surface((W, H), pygame.SRCALPHA)
@@ -489,4 +489,4 @@ def group_results(surf, scores, team, titles):
         text(surf, f"{sc.total:,}".replace(",", " "), 26, (255, 255, 255), (cx, cy), "topleft")
         for k in range(5):
             star(surf, cx - px(48) + k * px(24), cy + px(48), px(9), (255, 215, 64) if sc.stars > k else (90, 90, 110))
-    text(surf, "Entrée : retour", 20, (200, 200, 210), (W // 2, H - px(30)), "midbottom", bold=False)
+    text(surf, hint, 20, (200, 200, 210), (W // 2, H - px(30)), "midbottom", bold=False)

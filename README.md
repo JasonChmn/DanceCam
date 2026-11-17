@@ -58,6 +58,9 @@ Menu : ↑/↓ choisir · Entrée jouer · 1-4 joueurs, 5 groupe · A ajouter (c
 playlist, Ctrl+V) · Suppr supprimer · Échap quitter.
 En jeu : Espace ou Échap pause (Reprendre · Recommencer · Retour au menu ; aussi si on quitte la fenêtre) ·
 S squelettes coach · P pictos · ←/→ changer de coach (calibration).
+Fin de partie : Entrée = highlights, le meilleur et le pire passage (durée réglable 5-10 s, menu R) rejoués
+avec la musique ; chacun, ou la partie entière, s'enregistre en MP4 dans `clips/` (caméra + musique). La
+caméra n'est enregistrée que temporairement : rien n'est gardé sans clic sur « Enregistrer ».
 
 ### Importer
 `import_list` : déjà importées sautées, liste consommée au fur et à mesure, journal dans `logs/`,

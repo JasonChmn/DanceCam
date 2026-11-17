@@ -5,6 +5,7 @@
 Touches : Espace ou Échap = pause (Reprendre · Recommencer · Retour au menu), S = squelettes coach,
 P = pictos des mouvements à venir, ←/→ = changer de coach (calibration), F11 = plein écran.
 Hors partie (calibration, résultats), Échap = retour au menu. Fenêtre quittée (Alt+Tab) = pause.
+Résultats : Entrée = highlights (meilleur et pire passage, enregistrables en MP4 dans clips/).
 
 Mode groupe (--players 5 ou plus, jusqu'à 8) : comptage bras levés (5 s), photo où chacun reçoit son
 P1…Pn et son coach (clic : changer de coach, clic droit : retirer/ajouter, T : tous sur le même
@@ -22,7 +23,7 @@ import cv2
 import numpy as np
 import pygame
 
-from . import hud, library, media
+from . import highlights, hud, library, media
 from .capture import Camera, PlayerWorker
 from .config import Config
 from .gamelog import GameLog
@@ -32,7 +33,7 @@ from .pose import PoseEstimator
 from .scoring import CoachTrack, PlayerScore, TeamScore, assign_coaches, fun_titles, group_coaches, solo_coach
 from .tracking import arms_up
 
-CALIB, COUNTDOWN, PLAY, RESULTS, LOBBY, SNAP, PHOTO = range(7)   # LOBBY/SNAP/PHOTO : mode groupe
+CALIB, COUNTDOWN, PLAY, RESULTS, LOBBY, SNAP, PHOTO, HILITE = range(8)   # LOBBY/SNAP/PHOTO : mode groupe
 
 
 def open_display(fullscreen, window, vsync=True):
@@ -288,6 +289,9 @@ def run_game(disp, sess, song, n, log_path=None):
         for th in started:
             if hasattr(th, "join"):
                 th.join(timeout=2)
+        for th in started:
+            if hasattr(th, "discard"):       # enregistrement caméra : jamais gardé s'il n'est pas sauvé
+                th.discard(disp)
 
 
 def _run_game(disp, sess, song, n, log_path, started):
@@ -304,6 +308,9 @@ def _run_game(disp, sess, song, n, log_path, started):
     coach = CoachTrack(song / "poses.npz", cfg)
     pictos = Pictos(coach.kpts, coach.fps, cfg.kpt_conf)
     started.append(pictos)
+    highlights.clean_tmp(song)
+    rec, hl = None, None            # enregistrement caméra (pendant le jeu) ; highlights (après)
+    hl_play, hl_reader, hl_t0, hl_posters = None, None, 0.0, {}
     scores, records = [], []        # scores créés au démarrage de la musique (association figée)
     log = GameLog(log_path or Path("logs") / f"{song.name}_{time.strftime('%Y%m%d-%H%M%S')}.jsonl",
                   song=str(song), players=n, group=group, vsync=disp.vsync_on, cfg=dataclasses.asdict(cfg))
@@ -374,6 +381,82 @@ def _run_game(disp, sess, song, n, log_path, started):
         worker.lock_people(raw, range(len(raw[2])))     # suit tout le monde dès la photo
         return True
 
+    def hl_ok():
+        return hl is not None and hl.ok
+
+    def hl_button(W, H):
+        return pygame.Rect(W // 2 - hud.px(170), H - hud.px(100), hud.px(340), hud.px(50))
+
+    def hl_start(i, now):
+        """Lit le passage i (0 meilleur, 1 pire) avec la musique à cet endroit."""
+        nonlocal hl_play, hl_reader, hl_t0
+        if hl_reader is not None:
+            hl_reader.close()
+        c = hl.clips[i]
+        hl_play, hl_reader, hl_t0 = i, hl.reader(c["a"]), now
+        try:
+            pygame.mixer.music.play(start=c["a"])
+        except pygame.error as e:
+            print(f"[highlights] musique : {e}")
+
+    def hl_stop():
+        nonlocal hl_play, hl_reader
+        pygame.mixer.music.stop()
+        if hl_reader is not None:
+            hl_reader.close()
+        hl_play, hl_reader = None, None
+
+    def draw_highlights(screen, now):
+        nonlocal hl_play
+        W, H, px = L["W"], L["H"], hud.px
+        screen.fill((14, 14, 28))
+        hud.text(screen, "Highlights", 44, (255, 255, 255), (W // 2, px(24)), "midtop")
+        panes, sbtn, fbtn = highlights.layout(W, H, hl.size[0] / hl.size[1])
+        if hl_play is not None and now - hl_t0 >= hl.clips[hl_play]["b"] - hl.clips[hl_play]["a"]:
+            nxt = hl_play + 1 if hl_play + 1 < len(hl.clips) else None     # meilleur, puis pire
+            hl_stop()
+            if nxt is not None:
+                hl_start(nxt, now)
+        for i, r in enumerate(panes):
+            good = i == 0
+            col = (118, 255, 3) if good else (255, 90, 90)
+            hud.text(screen, "Meilleur moment" if good else "Pire moment", 26, col, (r.centerx, r.y - px(8)), "midbottom")
+            if i >= len(hl.clips):
+                pygame.draw.rect(screen, (32, 32, 54), r, border_radius=px(8))
+                hud.text(screen, "partie trop courte", 20, (180, 180, 195), r.center, "center", bold=False)
+                continue
+            c = hl.clips[i]
+            if hl_play == i:
+                s = c["a"] + (now - hl_t0)
+                f = hl_reader.get(hl.index(s))
+                if f is not None:
+                    screen.blit(hud.frame_surface(f, r.size), r)
+                hl.overlays(screen, s, r)
+                frac = min(1.0, (s - c["a"]) / (c["b"] - c["a"]))
+                pygame.draw.rect(screen, (40, 40, 60), (r.x, r.bottom + px(4), r.w, px(5)))
+                pygame.draw.rect(screen, col, (r.x, r.bottom + px(4), int(r.w * frac), px(5)))
+            else:
+                key = (i, r.size)
+                if key not in hl_posters and c["poster"] is not None:
+                    img = pygame.transform.smoothscale(hud.bgr_surface(c["poster"]), r.size)
+                    img.fill((110, 110, 110), special_flags=pygame.BLEND_RGB_MULT)
+                    hl_posters[key] = img
+                if key in hl_posters:
+                    screen.blit(hl_posters[key], r)
+                cx, cy, k = r.centerx, r.centery, px(28)
+                pygame.draw.polygon(screen, (255, 255, 255), [(cx - k // 2, cy - k), (cx - k // 2, cy + k), (cx + k, cy)])
+            pygame.draw.rect(screen, col, r, px(3), border_radius=px(4))
+            a, b = c["a"], c["b"]
+            hud.text(screen, f"{int(a) // 60}:{int(a) % 60:02d} – {int(b) // 60}:{int(b) % 60:02d} · {c['label']} en moyenne",
+                     20, (220, 220, 235), (r.centerx, r.bottom + px(14)), "midtop", bold=False)
+            st = hl.saved.get(("best", "worst")[i])
+            draw_button(screen, highlights.SAVE_TXT[st], sbtn[i], (0, 229, 255), on=st in (None, "error"))
+        st = hl.saved.get("full")
+        lab = "Enregistrer la partie entière" if st is None else highlights.SAVE_TXT[st]
+        draw_button(screen, lab, fbtn, (255, 215, 64), on=st in (None, "error"))
+        hud.text(screen, "Espace : rejouer · clic sur une vidéo : la revoir · Entrée / Échap : menu", 18,
+                 (200, 200, 215), (W // 2, H - px(16)), "midbottom", bold=False)
+
     state, stable_since, countdown_t0 = (LOBBY if group else CALIB), None, 0.0
     vsurf, vid_id = None, -1
     pause_sel, resume_at = None, None   # menu pause ouvert (bouton sélectionné) ; fin du compte à rebours de reprise
@@ -414,8 +497,28 @@ def _run_game(disp, sess, song, n, log_path, started):
                 pause_sel, resume_at = 0, None
             elif e.type == pygame.KEYDOWN and e.key == pygame.K_ESCAPE and state != PLAY:
                 outcome = "menu"
-            elif e.type == pygame.KEYDOWN and e.key in (pygame.K_RETURN, pygame.K_KP_ENTER) and state == RESULTS:
+            elif state == RESULTS and (e.type == pygame.KEYDOWN and e.key in (pygame.K_RETURN, pygame.K_KP_ENTER)
+                                       or e.type == pygame.MOUSEBUTTONDOWN and e.button == 1 and hl_ok()
+                                       and hl_button(W, H).collidepoint(e.pos)):
+                if hl_ok():
+                    state = HILITE
+                    hl_start(0, now)
+                else:
+                    outcome = "menu"
+            elif state == HILITE and e.type == pygame.KEYDOWN and e.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
                 outcome = "menu"
+            elif state == HILITE and e.type == pygame.KEYDOWN and e.key == pygame.K_SPACE:
+                hl_start(0, now)
+            elif state == HILITE and e.type == pygame.MOUSEBUTTONDOWN and e.button == 1:
+                panes, sbtn, fbtn = highlights.layout(W, H, hl.size[0] / hl.size[1])
+                for i, c in enumerate(hl.clips):
+                    key = ("best", "worst")[i]
+                    if panes[i].collidepoint(e.pos):
+                        hl_start(i, now)
+                    elif sbtn[i].collidepoint(e.pos) and hl.saved.get(key) in (None, "error"):
+                        hl.save(key, c["a"], c["b"])
+                if fbtn.collidepoint(e.pos) and hl.saved.get("full") in (None, "error"):
+                    hl.save("full", hl.t0, hl.t1)
             elif e.type == pygame.KEYDOWN and e.key == pygame.K_s:
                 show_coach_skel = not show_coach_skel
             elif e.type == pygame.KEYDOWN and e.key == pygame.K_p:
@@ -515,6 +618,9 @@ def _run_game(disp, sess, song, n, log_path, started):
             hud.text(screen, f"pose {worker.infer_ms:.0f} ms", 14, (180, 180, 190), (W - px(10), px(12)),
                      "topright", bold=False)
 
+        elif state == HILITE:
+            draw_highlights(screen, now)
+
         elif state == PHOTO:
             screen.fill((14, 14, 28))
             hud.coach_thumbs_row(screen, L["thumbs"], fx, ccolors, L["row"])
@@ -582,6 +688,12 @@ def _run_game(disp, sess, song, n, log_path, started):
                 hud.reset_crops()
                 log.write("mapping", coach_of_player=cmap, players=n)
                 pictos.set_colors(cmap)
+                try:
+                    rec = highlights.Recorder(cam, song)
+                    rec.start()
+                    started.append(rec)
+                except Exception as e:      # pas d'enregistrement : la partie se joue sans highlights
+                    print(f"[highlights] enregistrement impossible : {e}")
                 clock.start()
                 state = PLAY
 
@@ -589,12 +701,16 @@ def _run_game(disp, sess, song, n, log_path, started):
             if state == PLAY:
                 video.set_time(t)
                 paused = clock.paused_at is not None
+                if rec is not None:
+                    rec.mark(now, t)
                 while not worker.q.empty():
                     t_cap, ps = worker.q.get()
                     if paused:
                         continue
                     ts = t - (now - t_cap) - cfg.cam_latency  # temps chanson de la capture
                     log.track(ts, ps, cfg.kpt_conf)
+                    if rec is not None:
+                        rec.add_heads(ts, ps, cfg.kpt_conf)
                     for p, kp in enumerate(ps):
                         if kp is not None:
                             scores[p].add(ts, kp)
@@ -615,6 +731,14 @@ def _run_game(disp, sess, song, n, log_path, started):
                     log.close(scores)
                     records = library.save_result(song, scores, n)
                     print(f"[play] journal : {log.path}")
+                    if rec is not None:
+                        rec.stop()
+                        rec.join(timeout=2)
+                        try:
+                            hl = highlights.Highlights(rec, scores, cfg, song, song / "audio.ogg", meta["title"])
+                        except Exception as e:
+                            print(f"[highlights] indisponibles : {e}")
+                            hl = None
             if video.frame_id != vid_id and video.frame is not None:
                 vid_id, vsurf = video.frame_id, hud.bgr_surface(video.frame)
             screen.fill((0, 0, 0))
@@ -635,16 +759,20 @@ def _run_game(disp, sess, song, n, log_path, started):
                 hud.player_strip(screen, L["strip"], frame, poses, scores, t, cfg.kpt_conf, waiting)
             hud.text(screen, f"{tick.get_fps():.0f} fps · pose {worker.infer_ms:.0f} ms", 14,
                      (180, 180, 190), (W - px(10), px(12)), "topright", bold=False)
-            if state == RESULTS and group:
-                hud.group_results(screen, scores, team, titles)
-            elif state == RESULTS:
-                hud.results(screen, scores, records)
+            if state == RESULTS:
+                hint = "Entrée : highlights · Échap : menu" if hl_ok() else "Entrée : retour"
+                if group:
+                    hud.group_results(screen, scores, team, titles, hint)
+                else:
+                    hud.results(screen, scores, records, hint)
+                if hl_ok():
+                    draw_button(screen, "Voir les highlights", hl_button(W, H), (118, 255, 3))
             elif pause_sel is not None:
                 draw_pause(screen, pause_sel)
             elif resume_at is not None:
                 hud.text(screen, str(int(resume_at - now) + 1), 160, (255, 255, 255), (W // 2, H // 2), "center")
 
-        if state != RESULTS and now - cam.latest()[2] > 2.0:     # plus d'image depuis 2 s : câble débranché ?
+        if state not in (RESULTS, HILITE) and now - cam.latest()[2] > 2.0:     # plus d'image depuis 2 s : câble débranché ?
             hud.tag(screen, "Caméra perdue : vérifie le câble (reconnexion automatique)", 26, (255, 90, 90),
                     (W // 2, H // 2 - px(120)), "center")
         pygame.display.flip()
